@@ -79,12 +79,13 @@ async function initWASocket() {
 
       console.log(`[WA-ENGINE] Connection closed. Reason code: ${statusCode}`);
 
-      if (isLoggedOut) {
+      // ONLY clear session if account was registered before getting logged out
+      if (isLoggedOut && authState?.creds?.registered) {
         console.log('[WA-ENGINE] Logged out. Clearing session directory...');
         try {
           fs.rmSync(SESSION_DIR, { recursive: true, force: true });
         } catch (e) {}
-      } else if (state.creds.registered) {
+      } else if (authState?.creds?.registered) {
         setTimeout(() => {
           initWASocket().catch(err => console.error('[WA-ENGINE] Reconnect failed:', err));
         }, 3000);
@@ -95,7 +96,7 @@ async function initWASocket() {
   return sock;
 }
 
-// Generate pairing code reliably by waiting for QR event with latest WA Web version
+// Generate pairing code reliably by preserving session state during unauthenticated pairing handshake
 async function generatePairingCode(rawPhone) {
   const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
   authState = state;
