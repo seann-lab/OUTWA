@@ -92,10 +92,12 @@ async function initWASocket() {
           try {
             fs.rmSync(SESSION_DIR, { recursive: true, force: true });
           } catch (e) {}
-        } else if (authState?.creds?.registered) {
+        } else {
+          // ALWAYS reconnect automatically so the socket stays listening for phone pairing verification!
+          console.log('[WA-ENGINE] Connection dropped, reconnecting socket listener in 2s...');
           setTimeout(() => {
             initWASocket().catch(err => console.error('[WA-ENGINE] Reconnect failed:', err));
-          }, 3000);
+          }, 2000);
         }
       }
     }
@@ -104,7 +106,7 @@ async function initWASocket() {
   return sock;
 }
 
-// Generate pairing code using official Baileys signal key store pattern
+// Generate pairing code and keep auto-reconnecting socket listener active
 async function generatePairingCode(rawPhone) {
   const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
   authState = state;
@@ -157,7 +159,10 @@ async function generatePairingCode(rawPhone) {
         const { connection, qr, lastDisconnect } = update;
 
         if (connection === 'connecting') connectionStatus = 'CONNECTING';
-        if (connection === 'open') connectionStatus = 'CONNECTED';
+        if (connection === 'open') {
+          connectionStatus = 'CONNECTED';
+          console.log(`[WA-ENGINE] Successfully paired and logged in as: ${sock.user?.id || 'Unknown'}`);
+        }
 
         if (qr && !codeRequested) {
           codeRequested = true;
@@ -168,6 +173,15 @@ async function generatePairingCode(rawPhone) {
           } catch (err) {
             reject(err);
           }
+        }
+
+        if (connection === 'close') {
+          connectionStatus = 'DISCONNECTED';
+          const statusCode = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.statusCode;
+          console.log(`[WA-ENGINE] Pairing listener connection closed (Reason: ${statusCode}), auto-reconnecting socket...`);
+          setTimeout(() => {
+            initWASocket().catch(err => console.error('[WA-ENGINE] Reconnect during pairing failed:', err));
+          }, 2000);
         }
       }
     });
