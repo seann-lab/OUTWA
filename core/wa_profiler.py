@@ -38,13 +38,12 @@ def check_wa_engine_health() -> Dict[str, Any]:
 def request_wa_pairing_code(phone_number: str) -> Tuple[bool, str, str]:
     """
     Requests 8-digit pairing code from Baileys WA Engine.
-    Returns (success, pairing_code_or_error, raw_code)
     """
     try:
         resp = requests.post(
             f"{WA_ENGINE_URL}/request-pairing",
             json={"phone": phone_number},
-            timeout=15
+            timeout=25
         )
         data = resp.json()
         if data.get("success"):
@@ -53,7 +52,7 @@ def request_wa_pairing_code(phone_number: str) -> Tuple[bool, str, str]:
             return True, data.get("pairingCode", ""), data.get("rawCode", "")
         return False, data.get("error", "Unknown pairing error"), ""
     except Exception as e:
-        return False, f"Failed to connect to WA Engine: {str(e)}", ""
+        return False, f"Gagal terhubung ke WA Engine ({str(e)})", ""
 
 def start_wa_bulk_scan(job_id: str, phone_numbers: List[str]) -> Tuple[bool, str]:
     try:

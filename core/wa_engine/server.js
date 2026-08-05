@@ -16,7 +16,6 @@ import makeWASocket, {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Session dir inside project or home
 const SESSION_DIR = process.env.WA_SESSION_DIR || path.join(__dirname, 'session_data');
 if (!fs.existsSync(SESSION_DIR)) {
   fs.mkdirSync(SESSION_DIR, { recursive: true });
@@ -27,10 +26,8 @@ let authState = null;
 let saveCredsFunc = null;
 let connectionStatus = 'DISCONNECTED'; // DISCONNECTED, CONNECTING, CONNECTED
 
-// Jobs map for async batch scanning
 const jobs = new Map();
 
-// Initialize Baileys Socket lazily or on demand
 async function initWASocket() {
   if (sock && (connectionStatus === 'CONNECTED' || connectionStatus === 'CONNECTING')) {
     return sock;
@@ -46,7 +43,7 @@ async function initWASocket() {
     auth: state,
     printQRInTerminal: false,
     logger,
-    browser: Browsers.ubuntu('Chrome'),
+    browser: ['Ubuntu', 'Chrome', '20.0.04'],
     markOnlineOnConnect: false,
     syncFullHistory: false,
     fireInitQueries: false,
@@ -91,6 +88,35 @@ async function initWASocket() {
   });
 
   return sock;
+}
+
+// Helper to generate pairing code with dedicated socket instance
+async function getPairingCodeDirect(rawPhone) {
+  // If state folder is registered, return already registered
+  const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
+  if (state.creds.registered) {
+    return { registered: true };
+  }
+
+  const logger = pino({ level: 'silent' });
+  const pSock = makeWASocket({
+    auth: state,
+    printQRInTerminal: false,
+    logger,
+    browser: ['Ubuntu', 'Chrome', '20.0.04'],
+    markOnlineOnConnect: false,
+    syncFullHistory: false,
+    fireInitQueries: false,
+    getMessage: async () => undefined
+  });
+
+  pSock.ev.on('creds.update', saveCreds);
+
+  // Wait 3.2 seconds for Noise Handshake completion before calling requestPairingCode
+  await delay(3200);
+  
+  const code = await pSock.requestPairingCode(rawPhone);
+  return { registered: false, code };
 }
 
 // Raw w:biz IQ Query for Meta Verified (Vermet) & Business Profile
@@ -328,10 +354,10 @@ const server = createServer(async (req, res) => {
         return res.end(JSON.stringify({ success: false, error: 'Phone number is required' }));
       }
 
-      // Ensure WASocket is initialized
-      const socketInstance = await initWASocket();
+      console.log(`[WA-ENGINE] Requesting pairing code for ${rawPhone}...`);
+      const pairRes = await getPairingCodeDirect(rawPhone);
 
-      if (authState?.creds?.registered) {
+      if (pairRes.registered) {
         return res.end(JSON.stringify({
           success: true,
           registered: true,
@@ -339,14 +365,9 @@ const server = createServer(async (req, res) => {
         }));
       }
 
-      // Request pairing code with a 12-second safety timeout
-      const pairingPromise = socketInstance.requestPairingCode(rawPhone);
-      const timeoutPromise = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Pairing code request timed out from WhatsApp server')), 12000)
-      );
-
-      const code = await Promise.race([pairingPromise, timeoutPromise]);
+      const code = pairRes.code;
       const formattedCode = code.match(/.{1,4}/g)?.join('-') || code;
+      console.log(`[WA-ENGINE] Pairing code generated: ${formattedCode}`);
 
       return res.end(JSON.stringify({
         success: true,

@@ -287,7 +287,15 @@ async def process_pairing_phone(update: Update, context: ContextTypes.DEFAULT_TY
     target_phone = phone_data["formatted"]
     status_msg = await update.message.reply_text(f"⏳ Meminta Kode Pairing untuk `{target_phone}` dari Baileys Engine...", parse_mode="Markdown")
     
-    success, code_res, raw_code = await asyncio.to_thread(request_wa_pairing_code, target_phone)
+    try:
+        success, code_res, raw_code = await asyncio.wait_for(
+            asyncio.to_thread(request_wa_pairing_code, target_phone),
+            timeout=20.0
+        )
+    except asyncio.TimeoutError:
+        success, code_res, raw_code = False, "Waktu permintaan habis (Timeout 20s). Coba kirim ulang nomor.", ""
+    except Exception as err:
+        success, code_res, raw_code = False, str(err), ""
     
     if success:
         if code_res == "ALREADY_REGISTERED":
@@ -308,7 +316,10 @@ async def process_pairing_phone(update: Update, context: ContextTypes.DEFAULT_TY
         text = f"❌ *PAIRING GAGAL:* `{code_res}`\n\nPastikan service Node.js di wa_engine aktif."
         
     markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔍 Kembali ke Profiler Menu", callback_data="btn_profiler_menu")]])
-    await status_msg.edit_text(text, parse_mode="Markdown", reply_markup=markup)
+    try:
+        await status_msg.edit_text(text, parse_mode="Markdown", reply_markup=markup)
+    except Exception:
+        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=markup)
     return ConversationHandler.END
 
 async def start_profiler_scan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
