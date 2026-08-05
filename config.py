@@ -16,6 +16,9 @@ ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "")
 # Single string formatted like: "email1:pass1,email2:pass2" or default list
 GMAIL_ACCOUNTS_RAW = os.getenv("GMAIL_ACCOUNTS", "")
 
+# Optional Google Apps Script WebApp Relay URL for HTTPS 443 Email Sending
+APPS_SCRIPT_URL = os.getenv("APPS_SCRIPT_URL", "")
+
 def get_gmail_accounts():
     accounts = []
     if GMAIL_ACCOUNTS_RAW:
