@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import pino from 'pino';
 import makeWASocket, {
   useMultiFileAuthState,
+  fetchLatestBaileysVersion,
   Browsers,
   DisconnectReason,
   proto,
@@ -40,12 +41,14 @@ async function initWASocket() {
   saveCredsFunc = saveCreds;
 
   const logger = pino({ level: 'silent' });
+  const { version } = await fetchLatestBaileysVersion().catch(() => ({ version: [2, 3000, 1043857760] }));
 
   sock = makeWASocket({
+    version,
     auth: state,
     printQRInTerminal: false,
     logger,
-    browser: ['Ubuntu', 'Chrome', '20.0.04'],
+    browser: Browsers.macOS('Desktop'),
     markOnlineOnConnect: false,
     syncFullHistory: false,
     fireInitQueries: false,
@@ -92,7 +95,7 @@ async function initWASocket() {
   return sock;
 }
 
-// Generate pairing code reliably by listening to initial connection event
+// Generate pairing code reliably by waiting for QR event with latest WA Web version
 async function generatePairingCode(rawPhone) {
   const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
   authState = state;
@@ -106,19 +109,30 @@ async function generatePairingCode(rawPhone) {
     sock = null;
   }
 
+  try {
+    fs.rmSync(SESSION_DIR, { recursive: true, force: true });
+    fs.mkdirSync(SESSION_DIR, { recursive: true });
+  } catch (e) {}
+
+  const { state: newState, saveCreds: newSaveCreds } = await useMultiFileAuthState(SESSION_DIR);
+  authState = newState;
+
   const logger = pino({ level: 'silent' });
+  const { version } = await fetchLatestBaileysVersion().catch(() => ({ version: [2, 3000, 1043857760] }));
+
   sock = makeWASocket({
-    auth: state,
+    version,
+    auth: newState,
     printQRInTerminal: false,
     logger,
-    browser: ['Ubuntu', 'Chrome', '20.0.04'],
+    browser: Browsers.macOS('Desktop'),
     markOnlineOnConnect: false,
     syncFullHistory: false,
     fireInitQueries: false,
     getMessage: async () => undefined
   });
 
-  sock.ev.on('creds.update', saveCreds);
+  sock.ev.on('creds.update', newSaveCreds);
 
   let pairingCodePromise = new Promise((resolve, reject) => {
     let codeRequested = false;
@@ -128,11 +142,10 @@ async function generatePairingCode(rawPhone) {
       if (connection === 'connecting') connectionStatus = 'CONNECTING';
       if (connection === 'open') connectionStatus = 'CONNECTED';
 
-      if (!codeRequested && (qr || connection === 'connecting')) {
+      if (qr && !codeRequested) {
         codeRequested = true;
         try {
-          // Small delay for initial WS handshake
-          await delay(2000);
+          console.log(`[WA-ENGINE] Handshake ready (Latest WA Web v${version.join('.')}), requesting pairing code for ${rawPhone}...`);
           const code = await sock.requestPairingCode(rawPhone);
           sock.ev.off('connection.update', handler);
           resolve(code);
@@ -148,7 +161,7 @@ async function generatePairingCode(rawPhone) {
     setTimeout(() => {
       sock.ev.off('connection.update', handler);
       reject(new Error('Pairing code timeout from WhatsApp server'));
-    }, 15000);
+    }, 20000);
   });
 
   const code = await pairingCodePromise;
