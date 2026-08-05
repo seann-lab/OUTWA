@@ -87,7 +87,7 @@ def main():
         logger.error("TELEGRAM_BOT_TOKEN environment variable is missing! Exiting...")
         return
         
-    builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
+    builder = Application.builder().token(TELEGRAM_BOT_TOKEN).concurrent_updates(True)
     builder.post_init(post_init)
     app = builder.build()
 
@@ -114,7 +114,7 @@ def main():
     app.add_handler(CallbackQueryHandler(monitor_callback, pattern="^btn_monitor$"))
     app.add_handler(CallbackQueryHandler(senders_callback, pattern="^btn_senders$"))
 
-    logger.info("Starting Telegram Bot (Polling mode)...")
+    logger.info("Starting High-Performance Telegram Bot (Concurrent Polling mode)...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":

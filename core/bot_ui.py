@@ -1,3 +1,4 @@
+import asyncio
 import time
 import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -177,14 +178,15 @@ async def reroll_spec_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def execute_appeal_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await query.answer("Memproses pengiriman...")
     
     phone_data = context.user_data["phone_data"]
     email_payload = context.user_data["email_payload"]
     
     await query.edit_message_text("⏳ *MEMPROSES PENGIRIMAN...*\n\nMengirim email via SMTP Gmail ke 3 target WhatsApp Support...", parse_mode="Markdown")
     
-    success, msg, info = send_appeal_email(phone_data, email_payload)
+    # Non-blocking async thread execution to keep bot 100% fast and responsive
+    success, msg, info = await asyncio.to_thread(send_appeal_email, phone_data, email_payload)
     
     if success:
         text = (

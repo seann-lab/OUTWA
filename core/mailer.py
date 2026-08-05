@@ -11,7 +11,6 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import Dict, Any, Tuple
 from config import TARGET_RECIPIENTS, APPS_SCRIPT_URL, OUTBOUND_PROXY
-from core.database import get_next_sender, add_appeal
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +68,7 @@ def send_via_apps_script(sender_email: str, sender_password: str, sender_name: s
             data=json.dumps(payload),
             headers={"Content-Type": "text/plain;charset=utf-8"},
             proxies=proxies,
-            timeout=30,
+            timeout=10,
             allow_redirects=True
         )
         
@@ -84,13 +83,16 @@ def send_via_apps_script(sender_email: str, sender_password: str, sender_name: s
                     return True, "Email sent via Apps Script HTTP Bridge."
                 return False, f"Apps Script Non-JSON Response: {resp.text[:150]}"
         elif resp.status_code == 403:
-            return False, f"Apps Script 403 Forbidden. Pastikan: (1) URL berakhiran /exec bukan /dev, (2) 'Who has access' di-set 'Anyone', (3) Re-deploy New Version."
+            return False, f"Apps Script 403 Forbidden. Pastikan 'Who has access' di-set 'Anyone'."
         else:
             return False, f"Apps Script HTTP Status {resp.status_code}: {resp.text[:150]}"
     except Exception as e:
         return False, f"Apps Script HTTP Network Error: {str(e)}"
 
 def send_appeal_email(phone_data: Dict[str, Any], email_payload: Dict[str, str]) -> Tuple[bool, str, Dict[str, Any]]:
+    # Late import to prevent circular dependency
+    from core.database import get_next_sender, add_appeal
+    
     sender = get_next_sender()
     if not sender:
         return False, "No active Gmail sender available in sender pool.", {}
@@ -105,7 +107,41 @@ def send_appeal_email(phone_data: Dict[str, Any], email_payload: Dict[str, str])
     
     errors = []
 
-    # --- STRATEGY 1: HTTP Bridge via Google Apps Script (Port 443) ---
+    # --- STRATEGY 1: Direct SMTP SSL Port 465 FIRST (Fastest for Termux & Proxy environments) ---
+    msg = MIMEMultipart()
+    msg["From"] = f"{sender_name} <{sender_email}>"
+    msg["To"] = ", ".join(TARGET_RECIPIENTS)
+    msg["Subject"] = email_payload["subject"]
+    msg["Message-ID"] = message_id
+    msg["Date"] = email.utils.formatdate(localtime=True)
+    msg["User-Agent"] = "Mozilla/5.0 (Android 14; Mobile; rv:124.0) Gecko/124.0 Firefox/124.0"
+    msg.attach(MIMEText(email_payload["body"], "plain", "utf-8"))
+    
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=6) as server:
+            server.login(sender_email, sender_password)
+            server.sendmail(sender_email, TARGET_RECIPIENTS, msg.as_string())
+            
+        appeal_id = add_appeal(
+            phone_number=phone_data["formatted"],
+            country_code=phone_data["country_code"],
+            carrier=phone_data["carrier"],
+            sender_email=sender_email,
+            message_id=message_id,
+            subject=email_payload["subject"],
+            body=email_payload["body"]
+        )
+        return True, "Email sent successfully to 3 WhatsApp Support targets (Port 465 SSL).", {
+            "appeal_id": appeal_id,
+            "sender_email": sender_email,
+            "message_id": message_id,
+            "recipients": TARGET_RECIPIENTS
+        }
+    except Exception as e:
+        errors.append(f"Port 465 error: {str(e)}")
+        logger.warning(f"Port 465 failed: {e}. Trying HTTP Relay / Port 587...")
+
+    # --- STRATEGY 2: HTTP Bridge via Google Apps Script (Port 443) ---
     if APPS_SCRIPT_URL:
         success_http, msg_http = send_via_apps_script(
             sender_email, sender_password, sender_name, TARGET_RECIPIENTS, email_payload["subject"], email_payload["body"]
@@ -128,21 +164,10 @@ def send_appeal_email(phone_data: Dict[str, Any], email_payload: Dict[str, str])
             }
         else:
             errors.append(f"HTTP Relay Error: {msg_http}")
-            logger.warning(f"HTTP Relay failed: {msg_http}. Fallback to Direct SMTP...")
-
-    # --- STRATEGY 2: Direct SMTP (Port 587 / Port 465) ---
-    msg = MIMEMultipart()
-    msg["From"] = f"{sender_name} <{sender_email}>"
-    msg["To"] = ", ".join(TARGET_RECIPIENTS)
-    msg["Subject"] = email_payload["subject"]
-    msg["Message-ID"] = message_id
-    msg["Date"] = email.utils.formatdate(localtime=True)
-    msg["User-Agent"] = "Mozilla/5.0 (Android 14; Mobile; rv:124.0) Gecko/124.0 Firefox/124.0"
-    msg.attach(MIMEText(email_payload["body"], "plain", "utf-8"))
-    
-    # Try Port 587 STARTTLS
+            
+    # --- STRATEGY 3: Direct SMTP Port 587 STARTTLS (Fallback) ---
     try:
-        with smtplib.SMTP("smtp.gmail.com", 587, timeout=15) as server:
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=6) as server:
             server.ehlo()
             server.starttls()
             server.ehlo()
@@ -166,31 +191,5 @@ def send_appeal_email(phone_data: Dict[str, Any], email_payload: Dict[str, str])
         }
     except Exception as e:
         errors.append(f"Port 587 error: {str(e)}")
-        logger.warning(f"Port 587 failed: {e}. Trying Port 465 SSL...")
-
-    # Try Port 465 SSL
-    try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15) as server:
-            server.login(sender_email, sender_password)
-            server.sendmail(sender_email, TARGET_RECIPIENTS, msg.as_string())
-            
-        appeal_id = add_appeal(
-            phone_number=phone_data["formatted"],
-            country_code=phone_data["country_code"],
-            carrier=phone_data["carrier"],
-            sender_email=sender_email,
-            message_id=message_id,
-            subject=email_payload["subject"],
-            body=email_payload["body"]
-        )
-        return True, "Email sent successfully to 3 WhatsApp Support targets (Port 465).", {
-            "appeal_id": appeal_id,
-            "sender_email": sender_email,
-            "message_id": message_id,
-            "recipients": TARGET_RECIPIENTS
-        }
-    except Exception as e:
-        errors.append(f"Port 465 error: {str(e)}")
-        logger.warning(f"Port 465 failed: {e}.")
 
     return False, f"Send Error: { ' | '.join(errors) }", {}
