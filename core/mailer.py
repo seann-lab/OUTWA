@@ -4,8 +4,7 @@ import uuid
 import time
 import json
 import logging
-import urllib.request
-import urllib.parse
+import requests
 import email.utils
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -26,7 +25,7 @@ socket.getaddrinfo = _force_ipv4_getaddrinfo
 def send_via_apps_script(sender_email: str, sender_password: str, sender_name: str, recipients: list, subject: str, body: str) -> Tuple[bool, str]:
     """
     Sends email via Google Apps Script Web App HTTP Bridge over HTTPS Port 443.
-    Bypasses all Railway / Cloud provider SMTP port blocks (25, 465, 587).
+    Uses requests library to follow Google Apps Script 302/307 redirects automatically.
     """
     if not APPS_SCRIPT_URL:
         return False, "APPS_SCRIPT_URL environment variable is not configured."
@@ -41,21 +40,30 @@ def send_via_apps_script(sender_email: str, sender_password: str, sender_name: s
     }
     
     try:
-        data_bytes = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
+        # requests.post automatically follows 302 redirects from Google Apps Script
+        resp = requests.post(
             APPS_SCRIPT_URL,
-            data=data_bytes,
+            json=payload,
             headers={"Content-Type": "application/json"},
-            method="POST"
+            timeout=30,
+            allow_redirects=True
         )
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            res_text = resp.read().decode("utf-8")
-            res_json = json.loads(res_text)
-            if res_json.get("success"):
-                return True, "Email sent via Apps Script HTTP Bridge (Port 443)."
-            return False, f"Apps Script Error: {res_json.get('error', res_text)}"
+        
+        if resp.status_code == 200:
+            try:
+                res_json = resp.json()
+                if res_json.get("success"):
+                    return True, "Email sent via Apps Script HTTP Bridge (Port 443)."
+                return False, f"Apps Script Response Error: {res_json.get('error', resp.text)}"
+            except Exception:
+                # If non-JSON response returned but HTTP 200
+                if "success" in resp.text.lower() or "dispatched" in resp.text.lower():
+                    return True, "Email sent via Apps Script HTTP Bridge."
+                return False, f"Apps Script Non-JSON Response: {resp.text[:150]}"
+        else:
+            return False, f"Apps Script HTTP Status {resp.status_code}: {resp.text[:150]}"
     except Exception as e:
-        return False, f"Apps Script HTTP Error: {str(e)}"
+        return False, f"Apps Script HTTP Network Error: {str(e)}"
 
 def send_appeal_email(phone_data: Dict[str, Any], email_payload: Dict[str, str]) -> Tuple[bool, str, Dict[str, Any]]:
     sender = get_next_sender()
