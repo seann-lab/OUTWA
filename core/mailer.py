@@ -22,14 +22,23 @@ def _force_ipv4_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
 
 socket.getaddrinfo = _force_ipv4_getaddrinfo
 
+def sanitize_apps_script_url(url: str) -> str:
+    url = url.strip()
+    if url.endswith('/dev'):
+        url = url[:-4] + '/exec'
+    elif '/dev?' in url:
+        url = url.replace('/dev?', '/exec?')
+    return url
+
 def send_via_apps_script(sender_email: str, sender_password: str, sender_name: str, recipients: list, subject: str, body: str) -> Tuple[bool, str]:
     """
     Sends email via Google Apps Script Web App HTTP Bridge over HTTPS Port 443.
-    Uses text/plain Content-Type to prevent CORS preflight and Google Auth 403 restrictions.
     """
     if not APPS_SCRIPT_URL:
         return False, "APPS_SCRIPT_URL environment variable is not configured in Railway."
         
+    target_url = sanitize_apps_script_url(APPS_SCRIPT_URL)
+    
     payload = {
         "email": sender_email,
         "password": sender_password,
@@ -40,9 +49,9 @@ def send_via_apps_script(sender_email: str, sender_password: str, sender_name: s
     }
     
     try:
-        # Use text/plain for JSON payload to guarantee Google Apps Script accepts it without 403 preflight blocks
+        # Use text/plain for JSON payload to prevent CORS preflight and Google Auth 403 restrictions
         resp = requests.post(
-            APPS_SCRIPT_URL,
+            target_url,
             data=json.dumps(payload),
             headers={"Content-Type": "text/plain;charset=utf-8"},
             timeout=30,
@@ -60,7 +69,7 @@ def send_via_apps_script(sender_email: str, sender_password: str, sender_name: s
                     return True, "Email sent via Apps Script HTTP Bridge."
                 return False, f"Apps Script Non-JSON Response: {resp.text[:150]}"
         elif resp.status_code == 403:
-            return False, "Apps Script 403 Forbidden: Wajib ubah 'Who has access' menjadi 'Anyone' pada pengajuan deployment Google Apps Script."
+            return False, f"Apps Script 403 Forbidden on URL ({target_url}). Pastikan: (1) URL berakhiran /exec bukan /dev, (2) 'Who has access' di-set 'Anyone', (3) Re-deploy New Version."
         else:
             return False, f"Apps Script HTTP Status {resp.status_code}: {resp.text[:150]}"
     except Exception as e:
