@@ -25,7 +25,7 @@ socket.getaddrinfo = _force_ipv4_getaddrinfo
 def send_via_apps_script(sender_email: str, sender_password: str, sender_name: str, recipients: list, subject: str, body: str) -> Tuple[bool, str]:
     """
     Sends email via Google Apps Script Web App HTTP Bridge over HTTPS Port 443.
-    Sends raw JSON body to match Apps Script JSON parser.
+    Uses text/plain Content-Type to prevent CORS preflight and Google Auth 403 restrictions.
     """
     if not APPS_SCRIPT_URL:
         return False, "APPS_SCRIPT_URL environment variable is not configured in Railway."
@@ -40,11 +40,11 @@ def send_via_apps_script(sender_email: str, sender_password: str, sender_name: s
     }
     
     try:
-        # Send JSON payload explicitly so JSON.parse in Apps Script succeeds
+        # Use text/plain for JSON payload to guarantee Google Apps Script accepts it without 403 preflight blocks
         resp = requests.post(
             APPS_SCRIPT_URL,
-            json=payload,
-            headers={"Content-Type": "application/json"},
+            data=json.dumps(payload),
+            headers={"Content-Type": "text/plain;charset=utf-8"},
             timeout=30,
             allow_redirects=True
         )
@@ -54,11 +54,13 @@ def send_via_apps_script(sender_email: str, sender_password: str, sender_name: s
                 res_json = resp.json()
                 if res_json.get("success"):
                     return True, "Email sent via Apps Script HTTP Bridge (Port 443)."
-                return False, f"Apps Script Response Error: {res_json.get('error', resp.text)}"
+                return False, f"Apps Script Error: {res_json.get('error', resp.text)}"
             except Exception:
                 if "success" in resp.text.lower() or "dispatched" in resp.text.lower():
                     return True, "Email sent via Apps Script HTTP Bridge."
                 return False, f"Apps Script Non-JSON Response: {resp.text[:150]}"
+        elif resp.status_code == 403:
+            return False, "Apps Script 403 Forbidden: Wajib ubah 'Who has access' menjadi 'Anyone' pada pengajuan deployment Google Apps Script."
         else:
             return False, f"Apps Script HTTP Status {resp.status_code}: {resp.text[:150]}"
     except Exception as e:
