@@ -26,14 +26,16 @@ let sock = null;
 let authState = null;
 let saveCredsFunc = null;
 let connectionStatus = 'DISCONNECTED'; // DISCONNECTED, CONNECTING, CONNECTED
-let pairingCodeInFlight = null;
-let lastPairingError = null;
 
 // Jobs map for async batch scanning
 const jobs = new Map();
 
-// Initialize Baileys Socket
+// Initialize Baileys Socket lazily or on demand
 async function initWASocket() {
+  if (sock && (connectionStatus === 'CONNECTED' || connectionStatus === 'CONNECTING')) {
+    return sock;
+  }
+
   const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
   authState = state;
   saveCredsFunc = saveCreds;
@@ -65,8 +67,6 @@ async function initWASocket() {
 
     if (connection === 'open') {
       connectionStatus = 'CONNECTED';
-      pairingCodeInFlight = null;
-      lastPairingError = null;
       console.log(`[WA-ENGINE] Connected successfully as: ${sock.user?.id || 'Unknown'}`);
     }
 
@@ -83,13 +83,14 @@ async function initWASocket() {
           fs.rmSync(SESSION_DIR, { recursive: true, force: true });
         } catch (e) {}
       } else {
-        // Auto-reconnect backoff
         setTimeout(() => {
           initWASocket().catch(err => console.error('[WA-ENGINE] Reconnect failed:', err));
         }, 3000);
       }
     }
   });
+
+  return sock;
 }
 
 // Raw w:biz IQ Query for Meta Verified (Vermet) & Business Profile
@@ -176,7 +177,6 @@ async function runBatchScan(jobId, numbers) {
     const chunkJids = chunkRaw.map(n => n.includes('@') ? n : `${n.replace(/[^\d]/g, '')}@s.whatsapp.net`);
 
     try {
-      // Step 1: Batch onWhatsApp check (USync burst)
       const onWaResults = await sock.onWhatsApp(...chunkJids).catch(() => []);
       const registeredMap = new Map();
 
@@ -213,7 +213,6 @@ async function runBatchScan(jobId, numbers) {
           continue;
         }
 
-        // Step 2: Deep Inspection for Registered WA Numbers
         let bioText = '';
         try {
           const statusRes = await sock.fetchStatus(targetJid).catch(() => undefined);
@@ -237,7 +236,6 @@ async function runBatchScan(jobId, numbers) {
           if (accountType === 'Personal') accountType = 'Verified Enterprise';
         }
 
-        // Step 3: Check Commercial Offers & Catalogue
         let hasOffers = false;
         let category = profile?.category || '';
         let description = profile?.description || '';
@@ -249,7 +247,6 @@ async function runBatchScan(jobId, numbers) {
           }
         }
 
-        // Offer keyword detection in bio / description
         const offerKeywords = ['promo', 'diskon', 'order', 'jasa', 'jual', 'ready', 'price', 'harga', 'wa.me', 'http'];
         const combinedText = `${bioText} ${description}`.toLowerCase();
         if (offerKeywords.some(kw => combinedText.includes(kw))) {
@@ -271,7 +268,6 @@ async function runBatchScan(jobId, numbers) {
           bio: bioText
         });
 
-        // Jitter delay per item
         await delay(800, 1000);
       }
     } catch (err) {
@@ -279,7 +275,6 @@ async function runBatchScan(jobId, numbers) {
       await delay(10000);
     }
 
-    // Circuit breaker rest window per 250 items
     if ((i + CHUNK_SIZE) % REST_EVERY === 0 && i > 0) {
       console.log(`[WA-ENGINE] Circuit breaker rest window (${REST_MS / 1000}s) active...`);
       await delay(REST_MS, 3000);
@@ -333,9 +328,8 @@ const server = createServer(async (req, res) => {
         return res.end(JSON.stringify({ success: false, error: 'Phone number is required' }));
       }
 
-      if (!sock) {
-        await initWASocket();
-      }
+      // Ensure WASocket is initialized
+      const socketInstance = await initWASocket();
 
       if (authState?.creds?.registered) {
         return res.end(JSON.stringify({
@@ -345,16 +339,23 @@ const server = createServer(async (req, res) => {
         }));
       }
 
-      pairingCodeInFlight = await sock.requestPairingCode(rawPhone);
-      const formattedCode = pairingCodeInFlight.match(/.{1,4}/g)?.join('-') || pairingCodeInFlight;
+      // Request pairing code with a 12-second safety timeout
+      const pairingPromise = socketInstance.requestPairingCode(rawPhone);
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Pairing code request timed out from WhatsApp server')), 12000)
+      );
+
+      const code = await Promise.race([pairingPromise, timeoutPromise]);
+      const formattedCode = code.match(/.{1,4}/g)?.join('-') || code;
 
       return res.end(JSON.stringify({
         success: true,
         pairingCode: formattedCode,
-        rawCode: pairingCodeInFlight,
+        rawCode: code,
         phone: rawPhone
       }));
     } catch (e) {
+      console.error('[WA-ENGINE] Request pairing error:', e.message);
       res.statusCode = 500;
       return res.end(JSON.stringify({ success: false, error: e.message }));
     }
