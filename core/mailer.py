@@ -25,7 +25,7 @@ socket.getaddrinfo = _force_ipv4_getaddrinfo
 def send_via_apps_script(sender_email: str, sender_password: str, sender_name: str, recipients: list, subject: str, body: str) -> Tuple[bool, str]:
     """
     Sends email via Google Apps Script Web App HTTP Bridge over HTTPS Port 443.
-    Sends payload via URL-encoded form parameters / JSON to handle Google redirect behavior reliably.
+    Sends raw JSON body to match Apps Script JSON parser.
     """
     if not APPS_SCRIPT_URL:
         return False, "APPS_SCRIPT_URL environment variable is not configured in Railway."
@@ -40,10 +40,11 @@ def send_via_apps_script(sender_email: str, sender_password: str, sender_name: s
     }
     
     try:
-        # Use data=payload (form-encoded) so query params persist across 302 redirects if GET fallback occurs
+        # Send JSON payload explicitly so JSON.parse in Apps Script succeeds
         resp = requests.post(
             APPS_SCRIPT_URL,
-            data=payload,
+            json=payload,
+            headers={"Content-Type": "application/json"},
             timeout=30,
             allow_redirects=True
         )
