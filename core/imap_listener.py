@@ -24,7 +24,6 @@ def check_body_patterns(body_text: str) -> bool:
     return False
 
 def extract_phone_from_text(text: str) -> Optional[str]:
-    # Match international phone numbers like +628123456789 or 628123456789
     match = re.search(r"\+?\d{10,15}", text)
     if match:
         num = match.group(0)
@@ -40,19 +39,15 @@ def poll_gmail_inbox(sender: Dict[str, str], notify_callback: Optional[Callable]
         mail.login(email_user, email_pass)
         mail.select("inbox")
         
-        # Search unread/recent messages from support.whatsapp.com or whatsapp.com
+        # Strictly search for UNREAD messages from whatsapp.com only
         status, messages = mail.search(None, '(FROM "whatsapp.com" UNSEEN)')
-        if status != "OK" or not messages[0]:
-            # fallback to search ALL recent messages
-            status, messages = mail.search(None, '(FROM "whatsapp.com")')
             
         if status != "OK" or not messages[0]:
             mail.logout()
             return
 
         msg_ids = messages[0].split()
-        # Check last 10 messages max
-        for m_id in msg_ids[-10:]:
+        for m_id in msg_ids:
             res, msg_data = mail.fetch(m_id, "(RFC822)")
             for response_part in msg_data:
                 if isinstance(response_part, tuple):
@@ -61,7 +56,6 @@ def poll_gmail_inbox(sender: Dict[str, str], notify_callback: Optional[Callable]
                     subject = msg.get("Subject", "")
                     sender_from = msg.get("From", "")
                     
-                    # Extract body text
                     body = ""
                     if msg.is_multipart():
                         for part in msg.walk():
@@ -77,13 +71,12 @@ def poll_gmail_inbox(sender: Dict[str, str], notify_callback: Optional[Callable]
                         
                     full_text = f"{subject}\n{body}"
                     
-                    # Check pattern match
+                    # Verify BOTH whatsapp pattern AND pending appeal match to prevent false triggers
                     if check_body_patterns(full_text):
-                        # Try to correlate with pending appeals
                         pending_appeals = get_pending_appeals()
                         matched_appeal = None
                         
-                        # 1. Match phone in subject/body
+                        # Match phone number strictly inside the email text
                         for appeal in pending_appeals:
                             phone_raw = appeal["phone_number"]
                             phone_digits = phone_raw.replace("+", "")
@@ -91,10 +84,6 @@ def poll_gmail_inbox(sender: Dict[str, str], notify_callback: Optional[Callable]
                                 matched_appeal = appeal
                                 break
                                 
-                        # 2. If single pending appeal, associate it
-                        if not matched_appeal and len(pending_appeals) == 1:
-                            matched_appeal = pending_appeals[0]
-                            
                         if matched_appeal:
                             mark_appeal_success(matched_appeal["id"])
                             logger.info(f"MATCH SUCCESS! WhatsApp reply verified for {matched_appeal['phone_number']}")
