@@ -25,10 +25,10 @@ socket.getaddrinfo = _force_ipv4_getaddrinfo
 def send_via_apps_script(sender_email: str, sender_password: str, sender_name: str, recipients: list, subject: str, body: str) -> Tuple[bool, str]:
     """
     Sends email via Google Apps Script Web App HTTP Bridge over HTTPS Port 443.
-    Uses requests library to follow Google Apps Script 302/307 redirects automatically.
+    Explicitly handles 302/307 redirects from Google Apps Script by preserving POST payload.
     """
     if not APPS_SCRIPT_URL:
-        return False, "APPS_SCRIPT_URL environment variable is not configured."
+        return False, "APPS_SCRIPT_URL environment variable is not configured in Railway."
         
     payload = {
         "email": sender_email,
@@ -40,15 +40,26 @@ def send_via_apps_script(sender_email: str, sender_password: str, sender_name: s
     }
     
     try:
-        # requests.post automatically follows 302 redirects from Google Apps Script
+        # Step 1: Initial POST without auto-redirect to capture 302 location
         resp = requests.post(
             APPS_SCRIPT_URL,
             json=payload,
             headers={"Content-Type": "application/json"},
             timeout=30,
-            allow_redirects=True
+            allow_redirects=False
         )
         
+        # Step 2: Handle 302/307 Redirect explicitly by POSTing payload to redirect URL
+        if resp.status_code in (301, 302, 307, 308):
+            redirect_url = resp.headers.get("Location")
+            if redirect_url:
+                resp = requests.post(
+                    redirect_url,
+                    json=payload,
+                    headers={"Content-Type": "application/json"},
+                    timeout=30
+                )
+                
         if resp.status_code == 200:
             try:
                 res_json = resp.json()
@@ -56,7 +67,6 @@ def send_via_apps_script(sender_email: str, sender_password: str, sender_name: s
                     return True, "Email sent via Apps Script HTTP Bridge (Port 443)."
                 return False, f"Apps Script Response Error: {res_json.get('error', resp.text)}"
             except Exception:
-                # If non-JSON response returned but HTTP 200
                 if "success" in resp.text.lower() or "dispatched" in resp.text.lower():
                     return True, "Email sent via Apps Script HTTP Bridge."
                 return False, f"Apps Script Non-JSON Response: {resp.text[:150]}"
@@ -104,6 +114,8 @@ def send_appeal_email(phone_data: Dict[str, Any], email_payload: Dict[str, str])
         else:
             errors.append(f"HTTP Relay Error: {msg_http}")
             logger.warning(f"HTTP Relay failed: {msg_http}. Fallback to Direct SMTP...")
+    else:
+        errors.append("APPS_SCRIPT_URL variable is missing in Railway")
 
     # --- STRATEGY 2: Direct SMTP (Port 587 / Port 465) for Railway Pro or Local Environments ---
     msg = MIMEMultipart()
