@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import pino from 'pino';
 import makeWASocket, {
   useMultiFileAuthState,
+  makeCacheableSignalKeyStore,
   fetchLatestBaileysVersion,
   Browsers,
   DisconnectReason,
@@ -45,10 +46,13 @@ async function initWASocket() {
 
   sock = makeWASocket({
     version,
-    auth: state,
-    printQRInTerminal: false,
     logger,
-    browser: Browsers.macOS('Desktop'),
+    auth: {
+      creds: state.creds,
+      keys: makeCacheableSignalKeyStore(state.keys, logger)
+    },
+    printQRInTerminal: false,
+    browser: Browsers.ubuntu('Chrome'),
     markOnlineOnConnect: false,
     syncFullHistory: false,
     fireInitQueries: false,
@@ -57,38 +61,42 @@ async function initWASocket() {
     getMessage: async () => undefined
   });
 
-  sock.ev.on('creds.update', saveCreds);
-
-  sock.ev.on('connection.update', (update) => {
-    const { connection, lastDisconnect } = update;
-
-    if (connection === 'connecting') {
-      connectionStatus = 'CONNECTING';
-      console.log('[WA-ENGINE] Connecting to WhatsApp...');
+  sock.ev.process(async (events) => {
+    if (events['creds.update']) {
+      await saveCreds();
     }
 
-    if (connection === 'open') {
-      connectionStatus = 'CONNECTED';
-      console.log(`[WA-ENGINE] Connected successfully as: ${sock.user?.id || 'Unknown'}`);
-    }
+    if (events['connection.update']) {
+      const update = events['connection.update'];
+      const { connection, lastDisconnect } = update;
 
-    if (connection === 'close') {
-      connectionStatus = 'DISCONNECTED';
-      const statusCode = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.statusCode;
-      const isLoggedOut = statusCode === DisconnectReason.loggedOut;
+      if (connection === 'connecting') {
+        connectionStatus = 'CONNECTING';
+        console.log('[WA-ENGINE] Connecting to WhatsApp...');
+      }
 
-      console.log(`[WA-ENGINE] Connection closed. Reason code: ${statusCode}`);
+      if (connection === 'open') {
+        connectionStatus = 'CONNECTED';
+        console.log(`[WA-ENGINE] Connected successfully as: ${sock.user?.id || 'Unknown'}`);
+      }
 
-      // ONLY clear session if account was registered before getting logged out
-      if (isLoggedOut && authState?.creds?.registered) {
-        console.log('[WA-ENGINE] Logged out. Clearing session directory...');
-        try {
-          fs.rmSync(SESSION_DIR, { recursive: true, force: true });
-        } catch (e) {}
-      } else if (authState?.creds?.registered) {
-        setTimeout(() => {
-          initWASocket().catch(err => console.error('[WA-ENGINE] Reconnect failed:', err));
-        }, 3000);
+      if (connection === 'close') {
+        connectionStatus = 'DISCONNECTED';
+        const statusCode = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.statusCode;
+        const isLoggedOut = statusCode === DisconnectReason.loggedOut;
+
+        console.log(`[WA-ENGINE] Connection closed. Reason code: ${statusCode}`);
+
+        if (isLoggedOut && authState?.creds?.registered) {
+          console.log('[WA-ENGINE] Logged out. Clearing session directory...');
+          try {
+            fs.rmSync(SESSION_DIR, { recursive: true, force: true });
+          } catch (e) {}
+        } else if (authState?.creds?.registered) {
+          setTimeout(() => {
+            initWASocket().catch(err => console.error('[WA-ENGINE] Reconnect failed:', err));
+          }, 3000);
+        }
       }
     }
   });
@@ -96,7 +104,7 @@ async function initWASocket() {
   return sock;
 }
 
-// Generate pairing code reliably by preserving session state during unauthenticated pairing handshake
+// Generate pairing code using official Baileys signal key store pattern
 async function generatePairingCode(rawPhone) {
   const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
   authState = state;
@@ -123,46 +131,50 @@ async function generatePairingCode(rawPhone) {
 
   sock = makeWASocket({
     version,
-    auth: newState,
-    printQRInTerminal: false,
     logger,
-    browser: Browsers.macOS('Desktop'),
+    auth: {
+      creds: newState.creds,
+      keys: makeCacheableSignalKeyStore(newState.keys, logger)
+    },
+    printQRInTerminal: false,
+    browser: Browsers.ubuntu('Chrome'),
     markOnlineOnConnect: false,
     syncFullHistory: false,
     fireInitQueries: false,
     getMessage: async () => undefined
   });
 
-  sock.ev.on('creds.update', newSaveCreds);
-
   let pairingCodePromise = new Promise((resolve, reject) => {
     let codeRequested = false;
 
-    const handler = async (update) => {
-      const { connection, qr } = update;
-      if (connection === 'connecting') connectionStatus = 'CONNECTING';
-      if (connection === 'open') connectionStatus = 'CONNECTED';
+    sock.ev.process(async (events) => {
+      if (events['creds.update']) {
+        await newSaveCreds();
+      }
 
-      if (qr && !codeRequested) {
-        codeRequested = true;
-        try {
-          console.log(`[WA-ENGINE] Handshake ready (Latest WA Web v${version.join('.')}), requesting pairing code for ${rawPhone}...`);
-          const code = await sock.requestPairingCode(rawPhone);
-          sock.ev.off('connection.update', handler);
-          resolve(code);
-        } catch (err) {
-          sock.ev.off('connection.update', handler);
-          reject(err);
+      if (events['connection.update']) {
+        const update = events['connection.update'];
+        const { connection, qr, lastDisconnect } = update;
+
+        if (connection === 'connecting') connectionStatus = 'CONNECTING';
+        if (connection === 'open') connectionStatus = 'CONNECTED';
+
+        if (qr && !codeRequested) {
+          codeRequested = true;
+          try {
+            console.log(`[WA-ENGINE] Official Baileys Handshake ready (WA Web v${version.join('.')}), requesting pairing code for ${rawPhone}...`);
+            const code = await sock.requestPairingCode(rawPhone);
+            resolve(code);
+          } catch (err) {
+            reject(err);
+          }
         }
       }
-    };
-
-    sock.ev.on('connection.update', handler);
+    });
 
     setTimeout(() => {
-      sock.ev.off('connection.update', handler);
       reject(new Error('Pairing code timeout from WhatsApp server'));
-    }, 20000);
+    }, 25000);
   });
 
   const code = await pairingCodePromise;
