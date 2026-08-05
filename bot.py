@@ -47,6 +47,8 @@ from core.bot_ui import (
 from core.imap_listener import start_imap_listener_loop
 from core.wa_profiler import update_wa_engine_health_cache, check_wa_engine_health
 
+import shutil
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
@@ -67,18 +69,15 @@ def start_wa_engine_subprocess():
     except Exception:
         pass
 
-    engine_dir = Path(__file__).resolve().parent / "core" / "wa_engine"
-    server_script = engine_dir / "server.js"
+    engine_dir = Path("/data/data/com.termux/files/home/storage/shared/opencode-projects/Appeal bot/core/wa_engine")
+    node_bin = shutil.which("node") or "/data/data/com.termux/files/usr/bin/node"
     
-    if not server_script.exists():
-        logger.warning(f"WA Engine script not found at {server_script}")
-        return
-
     try:
         logger.info("Starting Baileys WA Engine Node.js Subprocess (Port 12711)...")
         engine_process = subprocess.Popen(
-            ["node", "server.js"],
+            [node_bin, "server.js"],
             cwd=str(engine_dir),
+            env=os.environ.copy(),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL
         )

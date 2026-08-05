@@ -17,7 +17,6 @@ import makeWASocket, {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Always use Termux internal home directory for session data to avoid SD-card / storage permission locks
 const SESSION_DIR = process.env.WA_SESSION_DIR || path.join(os.homedir(), '.wa_session_data');
 if (!fs.existsSync(SESSION_DIR)) {
   fs.mkdirSync(SESSION_DIR, { recursive: true });
@@ -26,13 +25,13 @@ if (!fs.existsSync(SESSION_DIR)) {
 let sock = null;
 let authState = null;
 let saveCredsFunc = null;
-let connectionStatus = 'DISCONNECTED'; // DISCONNECTED, CONNECTING, CONNECTED
+let connectionStatus = 'DISCONNECTED';
 const jobs = new Map();
 
 const delay = (baseMs, jitterMs = 500) => new Promise(r => setTimeout(r, baseMs + Math.random() * jitterMs));
 
-async function initWASocket(forceReconnect = false) {
-  if (sock && (connectionStatus === 'CONNECTED' || connectionStatus === 'CONNECTING') && !forceReconnect) {
+async function initWASocket() {
+  if (sock && (connectionStatus === 'CONNECTED' || connectionStatus === 'CONNECTING')) {
     return sock;
   }
 
@@ -41,11 +40,6 @@ async function initWASocket(forceReconnect = false) {
   saveCredsFunc = saveCreds;
 
   const logger = pino({ level: 'silent' });
-
-  // If not registered yet, do NOT auto-connect on startup to prevent 428 orphaned socket errors
-  if (!state.creds.registered && !forceReconnect) {
-    return null;
-  }
 
   sock = makeWASocket({
     auth: state,
@@ -89,7 +83,7 @@ async function initWASocket(forceReconnect = false) {
         } catch (e) {}
       } else if (state.creds.registered) {
         setTimeout(() => {
-          initWASocket(true).catch(err => console.error('[WA-ENGINE] Reconnect failed:', err));
+          initWASocket().catch(err => console.error('[WA-ENGINE] Reconnect failed:', err));
         }, 3000);
       }
     }
@@ -98,7 +92,7 @@ async function initWASocket(forceReconnect = false) {
   return sock;
 }
 
-// Generate pairing code cleanly
+// Generate pairing code reliably by listening to initial connection event
 async function generatePairingCode(rawPhone) {
   const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
   authState = state;
@@ -107,7 +101,6 @@ async function generatePairingCode(rawPhone) {
     return { registered: true };
   }
 
-  // Close existing socket if connecting/unregistered
   if (sock) {
     try { sock.end(undefined); } catch (e) {}
     sock = null;
@@ -127,17 +120,38 @@ async function generatePairingCode(rawPhone) {
 
   sock.ev.on('creds.update', saveCreds);
 
-  sock.ev.on('connection.update', (update) => {
-    const { connection, lastDisconnect } = update;
-    if (connection === 'connecting') connectionStatus = 'CONNECTING';
-    if (connection === 'open') connectionStatus = 'CONNECTED';
-    if (connection === 'close') connectionStatus = 'DISCONNECTED';
+  let pairingCodePromise = new Promise((resolve, reject) => {
+    let codeRequested = false;
+
+    const handler = async (update) => {
+      const { connection, qr } = update;
+      if (connection === 'connecting') connectionStatus = 'CONNECTING';
+      if (connection === 'open') connectionStatus = 'CONNECTED';
+
+      if (!codeRequested && (qr || connection === 'connecting')) {
+        codeRequested = true;
+        try {
+          // Small delay for initial WS handshake
+          await delay(2000);
+          const code = await sock.requestPairingCode(rawPhone);
+          sock.ev.off('connection.update', handler);
+          resolve(code);
+        } catch (err) {
+          sock.ev.off('connection.update', handler);
+          reject(err);
+        }
+      }
+    };
+
+    sock.ev.on('connection.update', handler);
+
+    setTimeout(() => {
+      sock.ev.off('connection.update', handler);
+      reject(new Error('Pairing code timeout from WhatsApp server'));
+    }, 15000);
   });
 
-  // Wait 3.2s for Noise Handshake completion
-  await delay(3200);
-
-  const code = await sock.requestPairingCode(rawPhone);
+  const code = await pairingCodePromise;
   return { registered: false, code };
 }
 
