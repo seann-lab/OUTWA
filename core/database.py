@@ -49,6 +49,18 @@ def init_db():
             )
         """)
         
+        # WA Profiler scan jobs table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS wa_profiler_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id TEXT UNIQUE NOT NULL,
+                total_numbers INTEGER DEFAULT 0,
+                status TEXT DEFAULT 'RUNNING',
+                file_path TEXT,
+                created_at INTEGER NOT NULL
+            )
+        """)
+        
         # System settings / pointer index
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS settings (
@@ -60,10 +72,6 @@ def init_db():
         conn.commit()
 
 def check_cooldown(phone_number: str) -> Tuple[bool, int]:
-    """
-    Checks if phone number is in cooldown.
-    Returns (is_cooldown_active, remaining_seconds).
-    """
     now = int(time.time())
     with get_connection() as conn:
         cursor = conn.cursor()
@@ -196,3 +204,22 @@ def get_next_sender() -> Optional[Dict]:
         cursor.execute("UPDATE senders_pool SET total_sent = total_sent + 1, last_used_at = ? WHERE id = ?", (now, selected["id"]))
         conn.commit()
         return selected
+
+def record_profiler_job(job_id: str, total_numbers: int):
+    now = int(time.time())
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO wa_profiler_jobs (job_id, total_numbers, status, created_at)
+            VALUES (?, ?, 'RUNNING', ?)
+            ON CONFLICT(job_id) DO UPDATE SET total_numbers = ?
+        """, (job_id, total_numbers, now, total_numbers))
+        conn.commit()
+
+def complete_profiler_job(job_id: str, file_path: str):
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE wa_profiler_jobs SET status = 'COMPLETED', file_path = ? WHERE job_id = ?
+        """, (file_path, job_id))
+        conn.commit()

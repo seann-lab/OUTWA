@@ -1,6 +1,10 @@
 import asyncio
 import logging
 import datetime
+import subprocess
+import os
+import sys
+from pathlib import Path
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -28,8 +32,15 @@ from core.bot_ui import (
     monitor_callback,
     senders_callback,
     add_sender_cmd,
+    profiler_menu_callback,
+    pairing_wizard_callback,
+    process_pairing_phone,
+    start_profiler_scan_callback,
+    process_profiler_input,
     cancel_handler,
-    WAITING_PHONE
+    WAITING_PHONE,
+    WAITING_PROFILER_INPUT,
+    WAITING_PAIRING_PHONE
 )
 from core.imap_listener import start_imap_listener_loop
 
@@ -39,10 +50,30 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+engine_process = None
+
+def start_wa_engine_subprocess():
+    global engine_process
+    engine_dir = Path(__file__).resolve().parent / "core" / "wa_engine"
+    server_script = engine_dir / "server.js"
+    
+    if not server_script.exists():
+        logger.warning(f"WA Engine script not found at {server_script}")
+        return
+
+    try:
+        logger.info("Starting Baileys WA Engine Node.js Subprocess (Port 12711)...")
+        engine_process = subprocess.Popen(
+            ["node", "server.js"],
+            cwd=str(engine_dir),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        logger.info(f"WA Engine Subprocess launched with PID {engine_process.pid}")
+    except Exception as e:
+        logger.error(f"Failed to launch WA Engine Subprocess: {e}")
+
 async def notify_whatsapp_success(app: Application, appeal_item: dict):
-    """
-    Push notification sent to admin Telegram chat when WhatsApp auto-reply is detected.
-    """
     if not ADMIN_CHAT_ID:
         return
         
@@ -71,6 +102,8 @@ async def post_init(app: Application):
     logger.info("Initializing database...")
     init_db()
     
+    start_wa_engine_subprocess()
+    
     env_senders = get_gmail_accounts()
     if env_senders:
         sync_senders_from_env(env_senders)
@@ -91,7 +124,7 @@ def main():
     builder.post_init(post_init)
     app = builder.build()
 
-    conv_handler = ConversationHandler(
+    appeal_conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(new_appeal_callback, pattern="^btn_new_appeal$")],
         states={
             WAITING_PHONE: [
@@ -104,18 +137,57 @@ def main():
         fallbacks=[
             CallbackQueryHandler(dashboard_callback, pattern="^btn_dashboard$"),
             CommandHandler("cancel", cancel_handler)
-        ]
+        ],
+        per_message=False
+    )
+
+    pairing_conv_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(pairing_wizard_callback, pattern="^btn_pairing_wizard$")],
+        states={
+            WAITING_PAIRING_PHONE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, process_pairing_phone),
+                CallbackQueryHandler(profiler_menu_callback, pattern="^btn_profiler_menu$")
+            ]
+        },
+        fallbacks=[
+            CallbackQueryHandler(profiler_menu_callback, pattern="^btn_profiler_menu$"),
+            CommandHandler("cancel", cancel_handler)
+        ],
+        per_message=False
+    )
+
+    scan_conv_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(start_profiler_scan_callback, pattern="^btn_start_profiler_scan$")],
+        states={
+            WAITING_PROFILER_INPUT: [
+                MessageHandler((filters.TEXT | filters.Document.ALL) & ~filters.COMMAND, process_profiler_input),
+                CallbackQueryHandler(profiler_menu_callback, pattern="^btn_profiler_menu$")
+            ]
+        },
+        fallbacks=[
+            CallbackQueryHandler(profiler_menu_callback, pattern="^btn_profiler_menu$"),
+            CommandHandler("cancel", cancel_handler)
+        ],
+        per_message=False
     )
 
     app.add_handler(CommandHandler("start", start_handler))
     app.add_handler(CommandHandler("addsender", add_sender_cmd))
-    app.add_handler(conv_handler)
+    app.add_handler(appeal_conv_handler)
+    app.add_handler(pairing_conv_handler)
+    app.add_handler(scan_conv_handler)
     app.add_handler(CallbackQueryHandler(dashboard_callback, pattern="^btn_dashboard$"))
+    app.add_handler(CallbackQueryHandler(profiler_menu_callback, pattern="^btn_profiler_menu$"))
     app.add_handler(CallbackQueryHandler(monitor_callback, pattern="^btn_monitor$"))
     app.add_handler(CallbackQueryHandler(senders_callback, pattern="^btn_senders$"))
 
     logger.info("Starting High-Performance Telegram Bot (Concurrent Polling mode)...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    try:
+        app.run_polling(allowed_updates=Update.ALL_TYPES)
+    finally:
+        if engine_process:
+            logger.info("Terminating WA Engine Subprocess...")
+            engine_process.terminate()
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,11 @@
+{
+  "name": "wa-engine-microservice",
+  "version": "1.0.0",
+  "description": "Baileys MD WA Profiler & Vermet Scanner Microservice",
+  "main": "server.js",
+  "type": "module",
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.24",
+    "pino": "^9.6.0"
+  }
+}

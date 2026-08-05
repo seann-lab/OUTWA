@@ -118,7 +118,7 @@ def send_appeal_email(phone_data: Dict[str, Any], email_payload: Dict[str, str])
     msg.attach(MIMEText(email_payload["body"], "plain", "utf-8"))
     
     try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=6) as server:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15) as server:
             server.login(sender_email, sender_password)
             server.sendmail(sender_email, TARGET_RECIPIENTS, msg.as_string())
             
@@ -167,7 +167,7 @@ def send_appeal_email(phone_data: Dict[str, Any], email_payload: Dict[str, str])
             
     # --- STRATEGY 3: Direct SMTP Port 587 STARTTLS (Fallback) ---
     try:
-        with smtplib.SMTP("smtp.gmail.com", 587, timeout=6) as server:
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=12) as server:
             server.ehlo()
             server.starttls()
             server.ehlo()
