@@ -25,7 +25,7 @@ socket.getaddrinfo = _force_ipv4_getaddrinfo
 def send_via_apps_script(sender_email: str, sender_password: str, sender_name: str, recipients: list, subject: str, body: str) -> Tuple[bool, str]:
     """
     Sends email via Google Apps Script Web App HTTP Bridge over HTTPS Port 443.
-    Explicitly handles 302/307 redirects from Google Apps Script by preserving POST payload.
+    Standard requests.post with allow_redirects=True handles Google Apps Script 302 redirects correctly.
     """
     if not APPS_SCRIPT_URL:
         return False, "APPS_SCRIPT_URL environment variable is not configured in Railway."
@@ -40,26 +40,14 @@ def send_via_apps_script(sender_email: str, sender_password: str, sender_name: s
     }
     
     try:
-        # Step 1: Initial POST without auto-redirect to capture 302 location
         resp = requests.post(
             APPS_SCRIPT_URL,
             json=payload,
             headers={"Content-Type": "application/json"},
             timeout=30,
-            allow_redirects=False
+            allow_redirects=True
         )
         
-        # Step 2: Handle 302/307 Redirect explicitly by POSTing payload to redirect URL
-        if resp.status_code in (301, 302, 307, 308):
-            redirect_url = resp.headers.get("Location")
-            if redirect_url:
-                resp = requests.post(
-                    redirect_url,
-                    json=payload,
-                    headers={"Content-Type": "application/json"},
-                    timeout=30
-                )
-                
         if resp.status_code == 200:
             try:
                 res_json = resp.json()
