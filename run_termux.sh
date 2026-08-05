@@ -10,18 +10,11 @@ if [ ! -f ".env" ]; then
     echo "⚠️ Warning: .env file not found!"
 fi
 
-# 1. Start Baileys WA Engine Node.js Microservice if not running
-ENGINE_PID=$(pgrep -f "node.*server.js")
-if [ -z "$ENGINE_PID" ]; then
-    echo "📡 Starting Baileys WA Engine Microservice on port 12711..."
-    cd core/wa_engine || exit 1
-    nohup node server.js > engine.log 2>&1 &
-    cd ../.. || exit 1
-    sleep 2
-    echo "✅ Baileys WA Engine started."
-else
-    echo "🟢 Baileys WA Engine is already running (PID: $ENGINE_PID)."
-fi
+# Clean up any orphan processes before starting
+pgrep -f "python.*bot.py" | xargs -r kill -9 2>/dev/null
+pgrep -f "node.*server.js" | xargs -r kill -9 2>/dev/null
 
-# 2. Start Main Telegram Bot
+sleep 1
+
+# Start Main Telegram Bot (which auto-manages Node.js server.js lifecycle)
 python3 bot.py

@@ -1,6 +1,7 @@
 import { createServer } from 'node:http';
 import path from 'node:path';
 import fs from 'node:fs';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import pino from 'pino';
 import makeWASocket, {
@@ -16,7 +17,8 @@ import makeWASocket, {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const SESSION_DIR = process.env.WA_SESSION_DIR || path.join(__dirname, 'session_data');
+// Always use Termux internal home directory for session data to avoid SD-card / storage permission locks
+const SESSION_DIR = process.env.WA_SESSION_DIR || path.join(os.homedir(), '.wa_session_data');
 if (!fs.existsSync(SESSION_DIR)) {
   fs.mkdirSync(SESSION_DIR, { recursive: true });
 }
@@ -25,11 +27,12 @@ let sock = null;
 let authState = null;
 let saveCredsFunc = null;
 let connectionStatus = 'DISCONNECTED'; // DISCONNECTED, CONNECTING, CONNECTED
-
 const jobs = new Map();
 
-async function initWASocket() {
-  if (sock && (connectionStatus === 'CONNECTED' || connectionStatus === 'CONNECTING')) {
+const delay = (baseMs, jitterMs = 500) => new Promise(r => setTimeout(r, baseMs + Math.random() * jitterMs));
+
+async function initWASocket(forceReconnect = false) {
+  if (sock && (connectionStatus === 'CONNECTED' || connectionStatus === 'CONNECTING') && !forceReconnect) {
     return sock;
   }
 
@@ -38,6 +41,11 @@ async function initWASocket() {
   saveCredsFunc = saveCreds;
 
   const logger = pino({ level: 'silent' });
+
+  // If not registered yet, do NOT auto-connect on startup to prevent 428 orphaned socket errors
+  if (!state.creds.registered && !forceReconnect) {
+    return null;
+  }
 
   sock = makeWASocket({
     auth: state,
@@ -79,9 +87,9 @@ async function initWASocket() {
         try {
           fs.rmSync(SESSION_DIR, { recursive: true, force: true });
         } catch (e) {}
-      } else {
+      } else if (state.creds.registered) {
         setTimeout(() => {
-          initWASocket().catch(err => console.error('[WA-ENGINE] Reconnect failed:', err));
+          initWASocket(true).catch(err => console.error('[WA-ENGINE] Reconnect failed:', err));
         }, 3000);
       }
     }
@@ -90,16 +98,23 @@ async function initWASocket() {
   return sock;
 }
 
-// Helper to generate pairing code with dedicated socket instance
-async function getPairingCodeDirect(rawPhone) {
-  // If state folder is registered, return already registered
+// Generate pairing code cleanly
+async function generatePairingCode(rawPhone) {
   const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
+  authState = state;
+
   if (state.creds.registered) {
     return { registered: true };
   }
 
+  // Close existing socket if connecting/unregistered
+  if (sock) {
+    try { sock.end(undefined); } catch (e) {}
+    sock = null;
+  }
+
   const logger = pino({ level: 'silent' });
-  const pSock = makeWASocket({
+  sock = makeWASocket({
     auth: state,
     printQRInTerminal: false,
     logger,
@@ -110,12 +125,19 @@ async function getPairingCodeDirect(rawPhone) {
     getMessage: async () => undefined
   });
 
-  pSock.ev.on('creds.update', saveCreds);
+  sock.ev.on('creds.update', saveCreds);
 
-  // Wait 3.2 seconds for Noise Handshake completion before calling requestPairingCode
+  sock.ev.on('connection.update', (update) => {
+    const { connection, lastDisconnect } = update;
+    if (connection === 'connecting') connectionStatus = 'CONNECTING';
+    if (connection === 'open') connectionStatus = 'CONNECTED';
+    if (connection === 'close') connectionStatus = 'DISCONNECTED';
+  });
+
+  // Wait 3.2s for Noise Handshake completion
   await delay(3200);
-  
-  const code = await pSock.requestPairingCode(rawPhone);
+
+  const code = await sock.requestPairingCode(rawPhone);
   return { registered: false, code };
 }
 
@@ -183,9 +205,6 @@ async function checkCommercialOffers(jid) {
 
   return { hasCatalog, productsCount, sampleProducts };
 }
-
-// Delay helper with jitter
-const delay = (baseMs, jitterMs = 1500) => new Promise(r => setTimeout(r, baseMs + Math.random() * jitterMs));
 
 // Batch Scan Runner (Anti-Banned Protected)
 async function runBatchScan(jobId, numbers) {
@@ -355,7 +374,7 @@ const server = createServer(async (req, res) => {
       }
 
       console.log(`[WA-ENGINE] Requesting pairing code for ${rawPhone}...`);
-      const pairRes = await getPairingCodeDirect(rawPhone);
+      const pairRes = await generatePairingCode(rawPhone);
 
       if (pairRes.registered) {
         return res.end(JSON.stringify({

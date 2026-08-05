@@ -4,6 +4,8 @@ import datetime
 import subprocess
 import os
 import sys
+import time
+import requests
 from pathlib import Path
 from telegram import Update
 from telegram.ext import (
@@ -43,6 +45,7 @@ from core.bot_ui import (
     WAITING_PAIRING_PHONE
 )
 from core.imap_listener import start_imap_listener_loop
+from core.wa_profiler import update_wa_engine_health_cache, check_wa_engine_health
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -54,6 +57,16 @@ engine_process = None
 
 def start_wa_engine_subprocess():
     global engine_process
+    
+    # Check if server is already running and healthy
+    try:
+        r = requests.get("http://127.0.0.1:12711/health", timeout=1)
+        if r.status_code == 200:
+            logger.info("Baileys WA Engine Node.js is already running and healthy.")
+            return
+    except Exception:
+        pass
+
     engine_dir = Path(__file__).resolve().parent / "core" / "wa_engine"
     server_script = engine_dir / "server.js"
     
@@ -70,8 +83,27 @@ def start_wa_engine_subprocess():
             stderr=subprocess.DEVNULL
         )
         logger.info(f"WA Engine Subprocess launched with PID {engine_process.pid}")
+        
+        # Wait up to 5 seconds for health endpoint to become ready
+        for i in range(10):
+            time.sleep(0.5)
+            try:
+                r = requests.get("http://127.0.0.1:12711/health", timeout=1)
+                if r.status_code == 200:
+                    logger.info("WA Engine Node.js server is fully ready and listening!")
+                    break
+            except Exception:
+                pass
     except Exception as e:
         logger.error(f"Failed to launch WA Engine Subprocess: {e}")
+
+async def refresh_wa_health_loop():
+    while True:
+        try:
+            await asyncio.to_thread(update_wa_engine_health_cache)
+        except Exception:
+            pass
+        await asyncio.sleep(5)
 
 async def notify_whatsapp_success(app: Application, appeal_item: dict):
     if not ADMIN_CHAT_ID:
@@ -103,6 +135,7 @@ async def post_init(app: Application):
     init_db()
     
     start_wa_engine_subprocess()
+    asyncio.create_task(refresh_wa_health_loop())
     
     env_senders = get_gmail_accounts()
     if env_senders:
