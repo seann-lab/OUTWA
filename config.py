@@ -19,6 +19,9 @@ GMAIL_ACCOUNTS_RAW = os.getenv("GMAIL_ACCOUNTS", "")
 # Optional Google Apps Script WebApp Relay URL for HTTPS 443 Email Sending
 APPS_SCRIPT_URL = os.getenv("APPS_SCRIPT_URL", "")
 
+# Optional SOCKS5/HTTP Proxy for Termux environment bypass
+OUTBOUND_PROXY = os.getenv("OUTBOUND_PROXY", "")
+
 def get_gmail_accounts():
     accounts = []
     if GMAIL_ACCOUNTS_RAW:

@@ -4,15 +4,28 @@ import uuid
 import time
 import json
 import logging
+import urllib.parse
 import requests
 import email.utils
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import Dict, Any, Tuple
-from config import TARGET_RECIPIENTS, APPS_SCRIPT_URL
+from config import TARGET_RECIPIENTS, APPS_SCRIPT_URL, OUTBOUND_PROXY
 from core.database import get_next_sender, add_appeal
 
 logger = logging.getLogger(__name__)
+
+# Apply SOCKS5 proxy if OUTBOUND_PROXY is configured in .env
+if OUTBOUND_PROXY:
+    try:
+        import socks
+        p = urllib.parse.urlparse(OUTBOUND_PROXY)
+        proxy_type = socks.SOCKS5 if p.scheme.startswith("socks5") else socks.HTTP
+        socks.set_default_proxy(proxy_type, p.hostname, p.port, username=p.username, password=p.password)
+        socks.wrap_module(smtplib)
+        logger.info(f"OUTBOUND_PROXY configured for SMTP ({p.hostname}:{p.port})")
+    except Exception as e:
+        logger.warning(f"Failed to setup OUTBOUND_PROXY for SMTP: {e}")
 
 # Force IPv4 resolution for sockets if legacy SMTP is used
 _orig_getaddrinfo = socket.getaddrinfo
@@ -35,7 +48,7 @@ def send_via_apps_script(sender_email: str, sender_password: str, sender_name: s
     Sends email via Google Apps Script Web App HTTP Bridge over HTTPS Port 443.
     """
     if not APPS_SCRIPT_URL:
-        return False, "APPS_SCRIPT_URL environment variable is not configured in Railway."
+        return False, "APPS_SCRIPT_URL environment variable is not configured."
         
     target_url = sanitize_apps_script_url(APPS_SCRIPT_URL)
     
@@ -48,12 +61,14 @@ def send_via_apps_script(sender_email: str, sender_password: str, sender_name: s
         "body": body
     }
     
+    proxies = {"http": OUTBOUND_PROXY, "https": OUTBOUND_PROXY} if OUTBOUND_PROXY else None
+
     try:
-        # Use text/plain for JSON payload to prevent CORS preflight and Google Auth 403 restrictions
         resp = requests.post(
             target_url,
             data=json.dumps(payload),
             headers={"Content-Type": "text/plain;charset=utf-8"},
+            proxies=proxies,
             timeout=30,
             allow_redirects=True
         )
@@ -69,7 +84,7 @@ def send_via_apps_script(sender_email: str, sender_password: str, sender_name: s
                     return True, "Email sent via Apps Script HTTP Bridge."
                 return False, f"Apps Script Non-JSON Response: {resp.text[:150]}"
         elif resp.status_code == 403:
-            return False, f"Apps Script 403 Forbidden on URL ({target_url}). Pastikan: (1) URL berakhiran /exec bukan /dev, (2) 'Who has access' di-set 'Anyone', (3) Re-deploy New Version."
+            return False, f"Apps Script 403 Forbidden. Pastikan: (1) URL berakhiran /exec bukan /dev, (2) 'Who has access' di-set 'Anyone', (3) Re-deploy New Version."
         else:
             return False, f"Apps Script HTTP Status {resp.status_code}: {resp.text[:150]}"
     except Exception as e:
@@ -90,7 +105,7 @@ def send_appeal_email(phone_data: Dict[str, Any], email_payload: Dict[str, str])
     
     errors = []
 
-    # --- STRATEGY 1: HTTP Bridge via Google Apps Script (Port 443 - Immune to Railway SMTP Blocks) ---
+    # --- STRATEGY 1: HTTP Bridge via Google Apps Script (Port 443) ---
     if APPS_SCRIPT_URL:
         success_http, msg_http = send_via_apps_script(
             sender_email, sender_password, sender_name, TARGET_RECIPIENTS, email_payload["subject"], email_payload["body"]
@@ -114,10 +129,8 @@ def send_appeal_email(phone_data: Dict[str, Any], email_payload: Dict[str, str])
         else:
             errors.append(f"HTTP Relay Error: {msg_http}")
             logger.warning(f"HTTP Relay failed: {msg_http}. Fallback to Direct SMTP...")
-    else:
-        errors.append("APPS_SCRIPT_URL variable is missing in Railway")
 
-    # --- STRATEGY 2: Direct SMTP (Port 587 / Port 465) for Railway Pro or Local Environments ---
+    # --- STRATEGY 2: Direct SMTP (Port 587 / Port 465) ---
     msg = MIMEMultipart()
     msg["From"] = f"{sender_name} <{sender_email}>"
     msg["To"] = ", ".join(TARGET_RECIPIENTS)
