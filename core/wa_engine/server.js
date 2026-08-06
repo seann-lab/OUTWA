@@ -82,7 +82,7 @@ async function initWASocket() {
       keys: makeCacheableSignalKeyStore(state.keys)
     },
     printQRInTerminal: false,
-    browser: Browsers.macOS('Chrome'),
+    browser: Browsers.ubuntu('Chrome'),
     markOnlineOnConnect: false,
     syncFullHistory: false,
     shouldSyncHistoryMessage: shouldSyncHistoryMessageFilter,
@@ -121,8 +121,8 @@ async function initWASocket() {
 
         console.log(`[WA-ENGINE] Connection closed. Reason code: ${statusCode}`);
 
-        if (isLoggedOut) {
-          console.log('[WA-ENGINE] Session invalid/logged out. Resetting state & preparing for new pairing...');
+        if (isLoggedOut || statusCode === 401 || statusCode === 405) {
+          console.log('[WA-ENGINE] Session invalid/logged out (Status ' + statusCode + '). Resetting state & preparing for new pairing...');
           try {
             fs.rmSync(SESSION_DIR, { recursive: true, force: true });
             fs.mkdirSync(SESSION_DIR, { recursive: true });
@@ -141,13 +141,14 @@ async function initWASocket() {
   return sock;
 }
 
-// Generate pairing code cleanly on a single fresh socket using Browsers.macOS('Chrome')
+// Generate pairing code cleanly on a single fresh socket using Browsers.ubuntu('Chrome')
 async function generatePairingCode(rawPhone) {
   if (sock) {
     try { sock.end(undefined); } catch (e) {}
     sock = null;
   }
 
+  // Clear any old/poisoned session folder before requesting a new pairing code
   try {
     fs.rmSync(SESSION_DIR, { recursive: true, force: true });
     fs.mkdirSync(SESSION_DIR, { recursive: true });
@@ -167,7 +168,7 @@ async function generatePairingCode(rawPhone) {
       keys: makeCacheableSignalKeyStore(state.keys)
     },
     printQRInTerminal: false,
-    browser: Browsers.macOS('Chrome'),
+    browser: Browsers.ubuntu('Chrome'),
     markOnlineOnConnect: false,
     syncFullHistory: false,
     shouldSyncHistoryMessage: shouldSyncHistoryMessageFilter,
