@@ -413,7 +413,7 @@ def run_profiler_suite():
         task = progress.add_task(f"[cyan]Scanning {len(numbers)} nomor...", total=len(numbers))
 
         while not progress.finished:
-            time.sleep(2)
+            time.sleep(1)
             job_data = get_wa_scan_job_status(job_id)
             if not job_data:
                 continue
@@ -428,27 +428,15 @@ def run_profiler_suite():
 
     job_final = get_wa_scan_job_status(job_id)
     results = job_final.get("results", []) if job_final else []
-
     active_wa = [r for r in results if r.get('exists')]
-    vermet_accounts = [r for r in results if r.get('isVermet')]
-    business_offers = [r for r in results if r.get('hasOffers')]
-    business_accounts = [r for r in results if r.get('accountType') == 'Business']
-
-    sum_table = Table(show_header=False, box=box.ROUNDED, expand=True, border_style="bold green")
-    sum_table.add_column("Metrik", style="bold yellow", width=30)
-    sum_table.add_column("Hasil Scan", style="bold white")
-
-    sum_table.add_row("Total Nomor Di-scan", str(len(results)))
-    sum_table.add_row("Nomor WA Aktif (Valid)", f"[bold green]{len(active_wa)}[/bold green] ({(len(active_wa)/len(results))*100:.1f}%)")
-    sum_table.add_row("Nomor Tidak Terdaftar (Di-filter)", f"[dim]{len(results) - len(active_wa)}[/dim]")
-    sum_table.add_row("Akun WA Bisnis", str(len(business_accounts)))
-    sum_table.add_row("Memiliki Penawaran / Katalog", str(len(business_offers)))
-    sum_table.add_row("Meta Verified (Vermet)", f"[bold cyan]{len(vermet_accounts)}[/bold cyan]")
-
-    console.print(Panel(sum_table, title="[bold white]📊 RINGKASAN HASIL BULK PROFILER[/bold white]", border_style="bold green", box=box.ROUNDED))
 
     filepath = generate_wa_profiler_csv(results, REPORTS_DIR, include_non_wa=False)
-    console.print(f"\n[bold green]📁 Laporan Bersih (Hanya Nomor Aktif) Tersimpan di:[/bold green]")
+
+    console.print(f"\n[bold green]🎉 BULK PROFILING SELESAI![/bold green]")
+    console.print(f" 📱 Total Di-scan        : [bold white]{len(results)} Nomor[/bold white]")
+    console.print(f" ✅ Terdaftar WA (Valid) : [bold green]{len(active_wa)} Nomor[/bold green] ({(len(active_wa)/len(results))*100:.1f}%)")
+    console.print(f" 🚫 Tidak Terdaftar     : [dim]{len(results) - len(active_wa)} Nomor (Di-filter)[/dim]\n")
+    console.print(f"📁 Laporan Bersih + FlameProxies USN Tersimpan di:")
     console.print(f"👉 [bold cyan]{filepath}[/bold cyan]\n")
 
     Prompt.ask("[dim]Tekan Enter untuk kembali ke menu utama...[/dim]")

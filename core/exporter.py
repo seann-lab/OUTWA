@@ -4,11 +4,13 @@ import os
 import datetime
 from pathlib import Path
 from typing import List, Dict, Any
+from core.asn_lookup import resolve_carrier_and_asn, build_flameproxies_usn
 
 def generate_wa_profiler_csv(results: List[Dict[str, Any]], output_dir: Path, include_non_wa: bool = False) -> str:
     """
     Generates structured CSV file for WA Profiler results.
     Filters out non-WA numbers by default to produce clean, high-value reports.
+    Includes Carrier ASN info and targeted FlameProxies USN for active WA numbers.
     Returns absolute file path.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -18,6 +20,8 @@ def generate_wa_profiler_csv(results: List[Dict[str, Any]], output_dir: Path, in
     headers = [
         "No Telepon Target",
         "Negara / Wilayah",
+        "Carrier & ASN",
+        "FlameProxies USN (Carrier Matched)",
         "Status WA",
         "Tipe Akun",
         "Status Vermet (Meta Verified)",
@@ -44,6 +48,10 @@ def generate_wa_profiler_csv(results: List[Dict[str, Any]], output_dir: Path, in
         if not country and phone.startswith("+62"):
             country = "Indonesia"
             
+        carrier_meta = resolve_carrier_and_asn(phone)
+        carrier_asn_str = carrier_meta["display"]
+        flameproxies_usn = build_flameproxies_usn(phone)
+            
         account_type = item.get("accountType", "Personal")
         is_vermet = "🟢 VERIFIED" if item.get("isVermet") else "⚪ UNVERIFIED"
         verified_name = item.get("verifiedName", "") or "-"
@@ -57,6 +65,8 @@ def generate_wa_profiler_csv(results: List[Dict[str, Any]], output_dir: Path, in
         rows.append([
             phone,
             country,
+            carrier_asn_str,
+            flameproxies_usn,
             status_wa,
             account_type,
             is_vermet,

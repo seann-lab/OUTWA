@@ -32,6 +32,25 @@ const jobs = new Map();
 
 const delay = (baseMs, jitterMs = 500) => new Promise(r => setTimeout(r, baseMs + Math.random() * jitterMs));
 
+const withTimeout = (promise, ms = 1500, fallback = undefined) => {
+  return Promise.race([
+    promise,
+    new Promise(resolve => setTimeout(() => resolve(fallback), ms))
+  ]);
+};
+
+const getWaWebVersion = async () => {
+  try {
+    const res = await fetch('https://web.whatsapp.com/check-update?version=1&platform=web');
+    const json = await res.json();
+    if (json && json.currentVersion) {
+      const v = json.currentVersion.split('.').map(Number);
+      if (v.length === 3) return { version: v };
+    }
+  } catch (e) {}
+  return await fetchLatestBaileysVersion().catch(() => ({ version: [2, 3000, 1043857760] }));
+};
+
 const shouldSyncHistoryMessageFilter = (msg) => {
   return msg.syncType !== proto.HistorySync.HistorySyncType.FULL;
 };
@@ -53,7 +72,7 @@ async function initWASocket() {
   }
 
   const logger = pino({ level: 'silent' });
-  const { version } = await fetchLatestBaileysVersion().catch(() => ({ version: [2, 3000, 1043857760] }));
+  const { version } = await getWaWebVersion();
 
   sock = makeWASocket({
     version,
@@ -63,7 +82,7 @@ async function initWASocket() {
       keys: makeCacheableSignalKeyStore(state.keys)
     },
     printQRInTerminal: false,
-    browser: Browsers.ubuntu('Chrome'),
+    browser: Browsers.macOS('Chrome'),
     markOnlineOnConnect: false,
     syncFullHistory: false,
     shouldSyncHistoryMessage: shouldSyncHistoryMessageFilter,
@@ -149,7 +168,7 @@ async function generatePairingCode(rawPhone) {
       keys: makeCacheableSignalKeyStore(state.keys)
     },
     printQRInTerminal: false,
-    browser: Browsers.ubuntu('Chrome'),
+    browser: Browsers.macOS('Chrome'),
     markOnlineOnConnect: false,
     syncFullHistory: false,
     shouldSyncHistoryMessage: shouldSyncHistoryMessageFilter,
@@ -220,37 +239,41 @@ async function getBusinessProfileRaw(jid) {
   let verified = null;
 
   try {
-    profile = await sock.getBusinessProfile(normalizedJid).catch(() => undefined);
+    profile = await withTimeout(sock.getBusinessProfile(normalizedJid), 1200, undefined);
   } catch (e) {}
 
-  try {
-    const results = await sock.query({
-      tag: 'iq',
-      attrs: { to: 's.whatsapp.net', xmlns: 'w:biz', type: 'get' },
-      content: [{ tag: 'business_profile', attrs: { v: '244' }, content: [{ tag: 'profile', attrs: { jid: normalizedJid } }] }]
-    });
+  if (profile) {
+    try {
+      const results = await withTimeout(sock.query({
+        tag: 'iq',
+        attrs: { to: 's.whatsapp.net', xmlns: 'w:biz', type: 'get' },
+        content: [{ tag: 'business_profile', attrs: { v: '244' }, content: [{ tag: 'profile', attrs: { jid: normalizedJid } }] }]
+      }), 1200, undefined);
 
-    const bizProfileNode = getBinaryNodeChild(results, 'business_profile');
-    if (bizProfileNode) {
-      const verifiedNode = getBinaryNodeChild(bizProfileNode, 'verified_name');
-      if (verifiedNode) {
-        const level = verifiedNode.attrs?.verified_level || 'none';
-        verified = { verifiedLevel: level, verifiedName: null, issuer: null };
+      if (results) {
+        const bizProfileNode = getBinaryNodeChild(results, 'business_profile');
+        if (bizProfileNode) {
+          const verifiedNode = getBinaryNodeChild(bizProfileNode, 'verified_name');
+          if (verifiedNode) {
+            const level = verifiedNode.attrs?.verified_level || 'none';
+            verified = { verifiedLevel: level, verifiedName: null, issuer: null };
 
-        const certBytes = verifiedNode.content;
-        if (certBytes instanceof Uint8Array || Buffer.isBuffer(certBytes)) {
-          try {
-            const cert = proto.VerifiedNameCertificate.decode(certBytes);
-            if (cert && cert.details) {
-              const details = proto.VerifiedNameCertificate.Details.decode(cert.details);
-              verified.verifiedName = details.verifiedName || null;
-              verified.issuer = details.issuer || null;
+            const certBytes = verifiedNode.content;
+            if (certBytes instanceof Uint8Array || Buffer.isBuffer(certBytes)) {
+              try {
+                const cert = proto.VerifiedNameCertificate.decode(certBytes);
+                if (cert && cert.details) {
+                  const details = proto.VerifiedNameCertificate.Details.decode(cert.details);
+                  verified.verifiedName = details.verifiedName || null;
+                  verified.issuer = details.issuer || null;
+                }
+              } catch (err) {}
             }
-          } catch (err) {}
+          }
         }
       }
-    }
-  } catch (e) {}
+    } catch (e) {}
+  }
 
   return { profile, verified };
 }
@@ -263,7 +286,7 @@ async function checkCommercialOffers(jid) {
   let sampleProducts = [];
 
   try {
-    const catalog = await sock.getCatalog({ jid: normalizedJid, limit: 10 }).catch(() => undefined);
+    const catalog = await withTimeout(sock.getCatalog({ jid: normalizedJid, limit: 10 }), 1200, undefined);
     if (catalog && catalog.products && catalog.products.length > 0) {
       hasCatalog = true;
       productsCount = catalog.products.length;
@@ -278,7 +301,7 @@ async function checkCommercialOffers(jid) {
   return { hasCatalog, productsCount, sampleProducts };
 }
 
-// Batch Scan Runner (Anti-Banned Protected)
+// Turbo High-Speed Batch Scan Runner
 async function runBatchScan(jobId, numbers) {
   const job = jobs.get(jobId);
   if (!job) return;
@@ -294,7 +317,7 @@ async function runBatchScan(jobId, numbers) {
     const chunkJids = chunkRaw.map(n => n.includes('@') ? n : `${n.replace(/[^\d]/g, '')}@s.whatsapp.net`);
 
     try {
-      const onWaResults = await sock.onWhatsApp(...chunkJids).catch(() => []);
+      const onWaResults = await withTimeout(sock.onWhatsApp(...chunkJids), 3000, []);
       const registeredMap = new Map();
 
       if (Array.isArray(onWaResults)) {
@@ -330,15 +353,18 @@ async function runBatchScan(jobId, numbers) {
           continue;
         }
 
-        let bioText = '';
-        try {
-          const statusRes = await sock.fetchStatus(targetJid).catch(() => undefined);
-          if (statusRes && statusRes.status) {
-            bioText = statusRes.status;
-          }
-        } catch (e) {}
+        // Parallel fetch status & profile for active WhatsApp accounts with 1.2s strict cap
+        const [statusResResult, bizResResult] = await Promise.allSettled([
+          withTimeout(sock.fetchStatus(targetJid), 1200, undefined),
+          getBusinessProfileRaw(targetJid)
+        ]);
 
-        const { profile, verified } = await getBusinessProfileRaw(targetJid);
+        const statusRes = statusResResult.status === 'fulfilled' ? statusResResult.value : undefined;
+        const bizRes = bizResResult.status === 'fulfilled' ? bizResResult.value : { profile: null, verified: null };
+
+        let bioText = statusRes?.status || '';
+        const profile = bizRes?.profile || null;
+        const verified = bizRes?.verified || null;
         
         let accountType = 'Personal';
         let isVermet = false;
@@ -357,6 +383,7 @@ async function runBatchScan(jobId, numbers) {
         let category = profile?.category || '';
         let description = profile?.description || '';
 
+        // Only query catalog if account is verified Business
         if (profile) {
           const offersInfo = await checkCommercialOffers(targetJid);
           if (offersInfo.hasCatalog || offersInfo.productsCount > 0) {
@@ -385,18 +412,18 @@ async function runBatchScan(jobId, numbers) {
           bio: bioText
         });
 
-        await delay(800, 1000);
+        await delay(150, 150);
       }
     } catch (err) {
       console.error(`[WA-ENGINE] Batch error at index ${i}:`, err.message);
-      await delay(10000);
+      await delay(2000);
     }
 
     if ((i + CHUNK_SIZE) % REST_EVERY === 0 && i > 0) {
       console.log(`[WA-ENGINE] Circuit breaker rest window (${REST_MS / 1000}s) active...`);
       await delay(REST_MS, 3000);
     } else {
-      await delay(2500, 2000);
+      await delay(500, 500);
     }
   }
 
