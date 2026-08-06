@@ -99,8 +99,9 @@ def imap_background_worker():
 
 def ensure_wa_engine_running():
     """Pre-flight check: ensures Baileys Node.js subprocess is listening on port 12711."""
+    local_proxies = {"http": None, "https": None}
     try:
-        r = requests.get("http://127.0.0.1:12711/health", timeout=1)
+        r = requests.get("http://127.0.0.1:12711/health", proxies=local_proxies, timeout=1)
         if r.status_code == 200:
             return True
     except Exception:
@@ -129,7 +130,7 @@ def ensure_wa_engine_running():
             for _ in range(20):
                 time.sleep(0.5)
                 try:
-                    r = requests.get("http://127.0.0.1:12711/health", timeout=1)
+                    r = requests.get("http://127.0.0.1:12711/health", proxies=local_proxies, timeout=1)
                     if r.status_code == 200:
                         return True
                 except Exception:

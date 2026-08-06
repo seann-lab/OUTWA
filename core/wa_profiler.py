@@ -5,6 +5,7 @@ from typing import Dict, Any, List, Tuple, Optional
 logger = logging.getLogger(__name__)
 
 WA_ENGINE_URL = "http://127.0.0.1:12711"
+LOCAL_PROXIES = {"http": None, "https": None}
 
 # In-Memory RAM Cache for 0.01ms Zero-Latency UI rendering
 _cached_wa_health: Dict[str, Any] = {
@@ -20,7 +21,7 @@ def update_wa_engine_health_cache() -> Dict[str, Any]:
     """
     global _cached_wa_health
     try:
-        resp = requests.get(f"{WA_ENGINE_URL}/health", timeout=2)
+        resp = requests.get(f"{WA_ENGINE_URL}/health", proxies=LOCAL_PROXIES, timeout=2)
         if resp.status_code == 200:
             _cached_wa_health = resp.json()
             return _cached_wa_health
@@ -43,6 +44,7 @@ def request_wa_pairing_code(phone_number: str) -> Tuple[bool, str, str]:
         resp = requests.post(
             f"{WA_ENGINE_URL}/request-pairing",
             json={"phone": phone_number},
+            proxies=LOCAL_PROXIES,
             timeout=35
         )
         data = resp.json()
@@ -59,6 +61,7 @@ def start_wa_bulk_scan(job_id: str, phone_numbers: List[str]) -> Tuple[bool, str
         resp = requests.post(
             f"{WA_ENGINE_URL}/scan",
             json={"jobId": job_id, "numbers": phone_numbers},
+            proxies=LOCAL_PROXIES,
             timeout=10
         )
         data = resp.json()
@@ -70,7 +73,7 @@ def start_wa_bulk_scan(job_id: str, phone_numbers: List[str]) -> Tuple[bool, str
 
 def get_wa_scan_job_status(job_id: str) -> Optional[Dict[str, Any]]:
     try:
-        resp = requests.get(f"{WA_ENGINE_URL}/job", params={"id": job_id}, timeout=5)
+        resp = requests.get(f"{WA_ENGINE_URL}/job", params={"id": job_id}, proxies=LOCAL_PROXIES, timeout=5)
         if resp.status_code == 200:
             data = resp.json()
             if data.get("success"):
@@ -81,7 +84,7 @@ def get_wa_scan_job_status(job_id: str) -> Optional[Dict[str, Any]]:
 
 def cancel_wa_scan_job(job_id: str) -> bool:
     try:
-        resp = requests.post(f"{WA_ENGINE_URL}/cancel-job", json={"jobId": job_id}, timeout=5)
+        resp = requests.post(f"{WA_ENGINE_URL}/cancel-job", json={"jobId": job_id}, proxies=LOCAL_PROXIES, timeout=5)
         return resp.json().get("success", False)
     except Exception:
         return False
