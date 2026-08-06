@@ -1,16 +1,20 @@
 import sqlite3
 import time
+import datetime
 from typing import Optional, List, Dict, Tuple
 from config import DB_PATH, COOLDOWN_SECONDS
 
 def get_connection():
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=15.0)
     conn.row_factory = sqlite3.Row
     return conn
 
 def init_db():
     with get_connection() as conn:
         cursor = conn.cursor()
+        
+        # PRAGMA WAL mode for sqlite concurrency
+        cursor.execute("PRAGMA journal_mode=WAL;")
         
         # Appeals table
         cursor.execute("""
@@ -61,17 +65,17 @@ def init_db():
             )
         """)
         
-        # System settings / pointer index
+        # Internal key-value settings table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
-                value TEXT
+                value TEXT NOT NULL
             )
         """)
         
         conn.commit()
 
-def check_cooldown(phone_number: str) -> Tuple[bool, int]:
+def is_cooldown_active(phone_number: str) -> Tuple[bool, int]:
     now = int(time.time())
     with get_connection() as conn:
         cursor = conn.cursor()
@@ -120,33 +124,39 @@ def mark_appeal_success_by_phone(phone_number: str) -> Optional[Dict]:
     now = int(time.time())
     with get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM appeals WHERE phone_number = ? AND status = 'PENDING' ORDER BY id DESC LIMIT 1", (phone_number,))
+        cursor.execute("""
+            SELECT * FROM appeals 
+            WHERE (phone_number = ? OR phone_number = ? OR phone_number LIKE ?)
+              AND status = 'PENDING'
+            ORDER BY created_at DESC LIMIT 1
+        """, (phone_number, phone_number.replace("+", ""), f"%{phone_number.replace('+', '')}%"))
         row = cursor.fetchone()
         if row:
-            cursor.execute("UPDATE appeals SET status = 'SUCCESS', updated_at = ? WHERE id = ?", (now, row["id"]))
+            item = dict(row)
+            cursor.execute("UPDATE appeals SET status = 'SUCCESS', updated_at = ? WHERE id = ?", (now, item["id"]))
             conn.commit()
-            return dict(row)
+            return item
     return None
 
 def get_pending_appeals() -> List[Dict]:
     with get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM appeals WHERE status = 'PENDING' ORDER BY id ASC")
+        cursor.execute("SELECT * FROM appeals WHERE status = 'PENDING' ORDER BY created_at DESC")
         return [dict(r) for r in cursor.fetchall()]
 
-def get_appeal_stats() -> Dict[str, int]:
+def get_recent_appeals(limit: int = 25) -> List[Dict]:
     with get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) as total FROM appeals")
-        total = cursor.fetchone()["total"]
-        cursor.execute("SELECT COUNT(*) as success FROM appeals WHERE status = 'SUCCESS'")
-        success = cursor.fetchone()["success"]
-        cursor.execute("SELECT COUNT(*) as pending FROM appeals WHERE status = 'PENDING'")
-        pending = cursor.fetchone()["pending"]
-        return {"total": total, "success": success, "pending": pending}
+        cursor.execute("SELECT * FROM appeals ORDER BY created_at DESC LIMIT ?", (limit,))
+        results = []
+        for r in cursor.fetchall():
+            d = dict(r)
+            d["sent_at"] = datetime.datetime.fromtimestamp(d["created_at"]).strftime("%d/%m %H:%M:%S")
+            d["ticket_id"] = f"#WA-{d['id']}"
+            results.append(d)
+        return results
 
-# Sender Pool Management (Round Robin)
-def sync_senders_from_env(env_accounts: List[Dict]):
+def sync_senders_from_env(env_accounts: List[Dict[str, str]]):
     with get_connection() as conn:
         cursor = conn.cursor()
         for acc in env_accounts:
@@ -199,7 +209,6 @@ def get_next_sender() -> Optional[Dict]:
             ON CONFLICT(key) DO UPDATE SET value = ?
         """, (str(next_pointer), str(next_pointer)))
         
-        # update usage count
         now = int(time.time())
         cursor.execute("UPDATE senders_pool SET total_sent = total_sent + 1, last_used_at = ? WHERE id = ?", (now, selected["id"]))
         conn.commit()

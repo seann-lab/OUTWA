@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 echo "=================================================="
-echo "🚀 STARTING WA APPEAL & PROFILER BOT ON TERMUX..."
+echo "🚀 STARTING OUTWA APEX TERMUX STANDALONE SUITE..."
 echo "=================================================="
 
 cd "$(dirname "$0")"
@@ -10,11 +10,15 @@ if [ ! -f ".env" ]; then
     echo "⚠️ Warning: .env file not found!"
 fi
 
-# Clean up any orphan processes before starting
-pgrep -f "python.*bot.py" | xargs -r kill -9 2>/dev/null
-pgrep -f "node.*server.js" | xargs -r kill -9 2>/dev/null
+# Acquire Termux Wake Lock to prevent CPU sleep when screen is off
+if command -v termux-wake-lock >/dev/null 2>&1; then
+    termux-wake-lock
+fi
+
+# Clean orphan processes
+pgrep -f "python.*cli.py" | xargs -r kill -9 2>/dev/null
 
 sleep 1
 
-# Start Main Telegram Bot (which auto-manages Node.js server.js lifecycle)
-python3 bot.py
+# Launch Master TUI Suite
+python3 cli.py

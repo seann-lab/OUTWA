@@ -32,14 +32,19 @@ const jobs = new Map();
 
 const delay = (baseMs, jitterMs = 500) => new Promise(r => setTimeout(r, baseMs + Math.random() * jitterMs));
 
+const shouldSyncHistoryMessageFilter = (msg) => {
+  return msg.syncType !== proto.HistorySync.HistorySyncType.FULL;
+};
+
+// Initialize socket only when account is FULLY registered
 async function initWASocket() {
   const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
   authState = state;
   saveCredsFunc = saveCreds;
 
-  // Only auto-connect on startup if account is ALREADY registered
   if (!state.creds.registered) {
-    console.log('[WA-ENGINE] Account is not registered yet. Waiting for pairing request...');
+    connectionStatus = 'DISCONNECTED';
+    console.log('[WA-ENGINE] Account is not registered yet. Ready for pairing request...');
     return null;
   }
 
@@ -55,12 +60,13 @@ async function initWASocket() {
     logger,
     auth: {
       creds: state.creds,
-      keys: makeCacheableSignalKeyStore(state.keys, logger)
+      keys: makeCacheableSignalKeyStore(state.keys)
     },
     printQRInTerminal: false,
     browser: Browsers.ubuntu('Chrome'),
     markOnlineOnConnect: false,
     syncFullHistory: false,
+    shouldSyncHistoryMessage: shouldSyncHistoryMessageFilter,
     fireInitQueries: false,
     connectTimeoutMs: 30000,
     keepAliveIntervalMs: 25000,
@@ -69,7 +75,10 @@ async function initWASocket() {
 
   sock.ev.process(async (events) => {
     if (events['creds.update']) {
-      await saveCreds();
+      try {
+        if (!fs.existsSync(SESSION_DIR)) fs.mkdirSync(SESSION_DIR, { recursive: true });
+        await saveCreds();
+      } catch (e) {}
     }
 
     if (events['connection.update']) {
@@ -94,11 +103,14 @@ async function initWASocket() {
         console.log(`[WA-ENGINE] Connection closed. Reason code: ${statusCode}`);
 
         if (isLoggedOut) {
-          console.log('[WA-ENGINE] Logged out. Clearing session directory...');
+          console.log('[WA-ENGINE] Session invalid/logged out. Resetting state & preparing for new pairing...');
           try {
             fs.rmSync(SESSION_DIR, { recursive: true, force: true });
+            fs.mkdirSync(SESSION_DIR, { recursive: true });
           } catch (e) {}
+          sock = null;
         } else if (state.creds.registered) {
+          console.log('[WA-ENGINE] Registered account connection drop, reconnecting in 3s...');
           setTimeout(() => {
             initWASocket().catch(err => console.error('[WA-ENGINE] Reconnect failed:', err));
           }, 3000);
@@ -110,13 +122,14 @@ async function initWASocket() {
   return sock;
 }
 
-// Generate pairing code cleanly on a single fresh socket
+// Generate pairing code cleanly matching tested Baileys pattern
 async function generatePairingCode(rawPhone) {
   if (sock) {
     try { sock.end(undefined); } catch (e) {}
     sock = null;
   }
 
+  // Clear any old/poisoned session folder before requesting a new pairing code
   try {
     fs.rmSync(SESSION_DIR, { recursive: true, force: true });
     fs.mkdirSync(SESSION_DIR, { recursive: true });
@@ -133,65 +146,71 @@ async function generatePairingCode(rawPhone) {
     logger,
     auth: {
       creds: state.creds,
-      keys: makeCacheableSignalKeyStore(state.keys, logger)
+      keys: makeCacheableSignalKeyStore(state.keys)
     },
     printQRInTerminal: false,
     browser: Browsers.ubuntu('Chrome'),
     markOnlineOnConnect: false,
     syncFullHistory: false,
+    shouldSyncHistoryMessage: shouldSyncHistoryMessageFilter,
     fireInitQueries: false,
     getMessage: async () => undefined
   });
 
-  sock.ev.process(async (events) => {
-    if (events['creds.update']) {
-      await saveCreds();
-    }
-    if (events['connection.update']) {
-      const update = events['connection.update'];
-      const { connection, lastDisconnect } = update;
-      if (connection === 'connecting') connectionStatus = 'CONNECTING';
-      if (connection === 'open') {
-        connectionStatus = 'CONNECTED';
-        console.log(`[WA-ENGINE] Pairing successful! Connected as: ${sock.user?.id || 'Unknown'}`);
-      }
-      if (connection === 'close') {
-        connectionStatus = 'DISCONNECTED';
-        const statusCode = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.statusCode;
-        console.log(`[WA-ENGINE] Socket closed. Code: ${statusCode}`);
-      }
-    }
-  });
+  return new Promise((resolve, reject) => {
+    let requested = false;
+    const timer = setTimeout(() => {
+      reject(new Error('Timed out waiting for pairing code (25s)'));
+    }, 25000);
 
-  let pairingCodePromise = new Promise((resolve, reject) => {
-    let codeRequested = false;
-
-    const qrHandler = async (update) => {
-      const { qr } = update;
-      if (qr && !codeRequested) {
-        codeRequested = true;
+    sock.ev.process(async (events) => {
+      if (events['creds.update']) {
         try {
-          console.log(`[WA-ENGINE] Handshake ready, requesting pairing code for ${rawPhone}...`);
-          const code = await sock.requestPairingCode(rawPhone);
-          sock.ev.off('connection.update', qrHandler);
-          resolve(code);
-        } catch (err) {
-          sock.ev.off('connection.update', qrHandler);
-          reject(err);
+          if (!fs.existsSync(SESSION_DIR)) fs.mkdirSync(SESSION_DIR, { recursive: true });
+          await saveCreds();
+        } catch (e) {}
+      }
+
+      if (events['connection.update']) {
+        const { connection, qr, lastDisconnect } = events['connection.update'];
+
+        if (connection === 'connecting') {
+          connectionStatus = 'CONNECTING';
+        }
+
+        if (connection === 'open') {
+          connectionStatus = 'CONNECTED';
+          console.log(`[WA-ENGINE] Connected as: ${sock.user?.id || 'Unknown'}`);
+        }
+
+        if (qr && !requested) {
+          requested = true;
+          try {
+            console.log(`[WA-ENGINE] Handshake ready (QR received), requesting pairing code for ${rawPhone}...`);
+            const code = await sock.requestPairingCode(rawPhone);
+            clearTimeout(timer);
+            resolve({ registered: false, code });
+          } catch (err) {
+            clearTimeout(timer);
+            reject(err);
+          }
+        }
+
+        if (connection === 'close') {
+          connectionStatus = 'DISCONNECTED';
+          const statusCode = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.statusCode;
+          console.log(`[WA-ENGINE] Pairing socket closed (Status Code: ${statusCode})`);
+
+          if (statusCode === 515 || statusCode === DisconnectReason.restartRequired) {
+            console.log('[WA-ENGINE] Post-pairing restart (Status 515) received, reconnecting to finalize login...');
+            setTimeout(() => {
+              initWASocket().catch(err => console.error('[WA-ENGINE] Post-515 reconnect failed:', err));
+            }, 1500);
+          }
         }
       }
-    };
-
-    sock.ev.on('connection.update', qrHandler);
-
-    setTimeout(() => {
-      sock.ev.off('connection.update', qrHandler);
-      reject(new Error('Pairing code timeout from WhatsApp server'));
-    }, 25000);
+    });
   });
-
-  const code = await pairingCodePromise;
-  return { registered: false, code };
 }
 
 // Raw w:biz IQ Query for Meta Verified (Vermet) & Business Profile

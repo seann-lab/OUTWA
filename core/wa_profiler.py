@@ -43,7 +43,7 @@ def request_wa_pairing_code(phone_number: str) -> Tuple[bool, str, str]:
         resp = requests.post(
             f"{WA_ENGINE_URL}/request-pairing",
             json={"phone": phone_number},
-            timeout=25
+            timeout=35
         )
         data = resp.json()
         if data.get("success"):

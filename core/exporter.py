@@ -5,13 +5,14 @@ import datetime
 from pathlib import Path
 from typing import List, Dict, Any
 
-def generate_wa_profiler_csv(results: List[Dict[str, Any]], output_dir: Path) -> str:
+def generate_wa_profiler_csv(results: List[Dict[str, Any]], output_dir: Path, include_non_wa: bool = False) -> str:
     """
     Generates structured CSV file for WA Profiler results.
+    Filters out non-WA numbers by default to produce clean, high-value reports.
     Returns absolute file path.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
-    filename = f"WA_Profiler_Report_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    filename = f"WA_Profiler_Active_Report_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
     filepath = output_dir / filename
     
     headers = [
@@ -30,8 +31,13 @@ def generate_wa_profiler_csv(results: List[Dict[str, Any]], output_dir: Path) ->
     
     rows = []
     for item in results:
-        phone = item.get("phone", "")
         exists = item.get("exists", False)
+        
+        # Filter out unregistered numbers unless explicitly requested
+        if not exists and not include_non_wa:
+            continue
+            
+        phone = item.get("phone", "")
         status_wa = "TERDAFTAR (VALID)" if exists else "TIDAK TERDAFTAR"
         
         country = item.get("country", "")
@@ -62,9 +68,9 @@ def generate_wa_profiler_csv(results: List[Dict[str, Any]], output_dir: Path) ->
             bio
         ])
         
-    with open(filepath, "w", newline="", encoding="utf-8-sig") as f:
+    with open(filepath, mode="w", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
         writer.writerow(headers)
         writer.writerows(rows)
         
-    return str(filepath)
+    return str(filepath.resolve())

@@ -290,10 +290,10 @@ async def process_pairing_phone(update: Update, context: ContextTypes.DEFAULT_TY
     try:
         success, code_res, raw_code = await asyncio.wait_for(
             asyncio.to_thread(request_wa_pairing_code, target_phone),
-            timeout=20.0
+            timeout=35.0
         )
     except asyncio.TimeoutError:
-        success, code_res, raw_code = False, "Waktu permintaan habis (Timeout 20s). Coba kirim ulang nomor.", ""
+        success, code_res, raw_code = False, "Waktu permintaan habis (Timeout 35s). Coba kirim ulang nomor.", ""
     except Exception as err:
         success, code_res, raw_code = False, str(err), ""
     
