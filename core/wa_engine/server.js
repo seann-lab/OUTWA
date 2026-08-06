@@ -39,10 +39,6 @@ const withTimeout = (promise, ms = 800, fallback = undefined) => {
   ]);
 };
 
-const getWaWebVersion = async () => {
-  return await fetchLatestBaileysVersion().catch(() => ({ version: [2, 3000, 1043857760] }));
-};
-
 const shouldSyncHistoryMessageFilter = (msg) => {
   return msg.syncType !== proto.HistorySync.HistorySyncType.FULL;
 };
@@ -64,10 +60,8 @@ async function initWASocket() {
   }
 
   const logger = pino({ level: 'silent' });
-  const { version } = await getWaWebVersion();
 
   sock = makeWASocket({
-    version,
     logger,
     auth: {
       creds: state.creds,
@@ -154,10 +148,8 @@ async function generatePairingCode(rawPhone) {
   authState = state;
 
   const logger = pino({ level: 'silent' });
-  const { version } = await getWaWebVersion();
 
   sock = makeWASocket({
-    version,
     logger,
     auth: {
       creds: state.creds,
