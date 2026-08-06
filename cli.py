@@ -106,12 +106,23 @@ def ensure_wa_engine_running():
     except Exception:
         pass
 
-    engine_dir = Path(__file__).resolve().parent / "core" / "wa_engine"
+    engine_dir = Path("/data/data/com.termux/files/home/storage/shared/opencode-projects/Appeal bot/core/wa_engine")
+    if not engine_dir.exists():
+        engine_dir = Path(__file__).resolve().parent / "core" / "wa_engine"
+        
     node_bin = shutil.which("node") or "/data/data/com.termux/files/usr/bin/node"
     
     if (engine_dir / "server.js").exists():
         try:
             env = os.environ.copy()
+            # Clean proxy vars for node
+            env.pop('HTTP_PROXY', None)
+            env.pop('HTTPS_PROXY', None)
+            env.pop('ALL_PROXY', None)
+            env.pop('http_proxy', None)
+            env.pop('https_proxy', None)
+            env.pop('all_proxy', None)
+            
             subprocess.Popen(
                 [node_bin, "server.js"],
                 cwd=str(engine_dir),
@@ -119,7 +130,7 @@ def ensure_wa_engine_running():
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
-            for _ in range(10):
+            for _ in range(15):
                 time.sleep(0.5)
                 try:
                     r = requests.get("http://127.0.0.1:12711/health", timeout=1)
@@ -511,6 +522,7 @@ def manage_senders_menu():
         time.sleep(2)
 
 def run_pairing_wizard():
+    ensure_wa_engine_running()
     console.clear()
     console.print(render_header())
     console.print(Panel("[bold blue]📱 WHATSAPP HELPER PAIRING WIZARD[/bold blue]", border_style="blue", box=box.ROUNDED))
