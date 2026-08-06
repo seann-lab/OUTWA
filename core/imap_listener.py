@@ -10,18 +10,6 @@ from core.database import get_active_senders, get_pending_appeals, mark_appeal_s
 
 logger = logging.getLogger(__name__)
 
-# Apply SOCKS5 proxy if OUTBOUND_PROXY is configured
-if OUTBOUND_PROXY:
-    try:
-        import socks
-        p = urllib.parse.urlparse(OUTBOUND_PROXY)
-        proxy_type = socks.SOCKS5 if p.scheme.startswith("socks5") else socks.HTTP
-        socks.set_default_proxy(proxy_type, p.hostname, p.port, username=p.username, password=p.password)
-        socks.wrap_module(imaplib)
-        logger.info(f"OUTBOUND_PROXY configured for IMAP ({p.hostname}:{p.port})")
-    except Exception as e:
-        logger.warning(f"Failed to setup OUTBOUND_PROXY for IMAP: {e}")
-
 # Patterns matching WhatsApp Zendesk auto-reply
 PATTERNS = [
     r"Contact us in our app",
@@ -30,6 +18,29 @@ PATTERNS = [
     r"support form or browse our Help Center",
     r"collect information that’s necessary to understand and resolve your issue"
 ]
+
+def create_socks5_imap_connection(host: str = "imap.gmail.com", port: int = 993, timeout: int = 15):
+    """
+    Creates isolated SOCKS5 IMAP4_SSL connection without polluting global socket.socket.
+    """
+    if OUTBOUND_PROXY:
+        try:
+            import socks
+            p = urllib.parse.urlparse(OUTBOUND_PROXY)
+            proxy_type = socks.SOCKS5 if p.scheme.startswith("socks5") else socks.HTTP
+            
+            s = socks.socksocket()
+            s.set_proxy(proxy_type, p.hostname, p.port, username=p.username, password=p.password)
+            s.settimeout(timeout)
+            s.connect((host, port))
+            
+            mail = imaplib.IMAP4_SSL(host, port, timeout=timeout)
+            mail.sock = s
+            return mail
+        except Exception as e:
+            logger.warning(f"SOCKS5 Proxy IMAP connection failed: {e}. Falling back to direct socket.")
+            
+    return imaplib.IMAP4_SSL(host, port, timeout=timeout)
 
 def check_body_patterns(body_text: str) -> bool:
     for pat in PATTERNS:
@@ -49,11 +60,10 @@ def poll_gmail_inbox(sender: Dict[str, str], notify_callback: Optional[Callable]
     email_pass = sender["password"]
     
     try:
-        mail = imaplib.IMAP4_SSL("imap.gmail.com", 993, timeout=15)
+        mail = create_socks5_imap_connection("imap.gmail.com", 993, timeout=15)
         mail.login(email_user, email_pass)
         mail.select("inbox")
         
-        # Search ONLY UNREAD messages from whatsapp.com
         status, messages = mail.search(None, '(FROM "whatsapp.com" UNSEEN)')
             
         if status != "OK" or not messages[0]:
@@ -62,7 +72,6 @@ def poll_gmail_inbox(sender: Dict[str, str], notify_callback: Optional[Callable]
 
         msg_ids = messages[0].split()
         for m_id in msg_ids:
-            # Fetch message body
             res, msg_data = mail.fetch(m_id, "(RFC822)")
             for response_part in msg_data:
                 if isinstance(response_part, tuple):
@@ -85,36 +94,35 @@ def poll_gmail_inbox(sender: Dict[str, str], notify_callback: Optional[Callable]
                     full_text = f"{subject}\n{body}"
                     
                     if check_body_patterns(full_text):
-                        pending_appeals = get_pending_appeals()
-                        matched_appeal = None
+                        phone_matched = extract_phone_from_text(full_text)
                         
-                        for appeal in pending_appeals:
-                            phone_raw = appeal["phone_number"]
-                            phone_digits = phone_raw.replace("+", "")
-                            if phone_raw in full_text or phone_digits in full_text:
-                                matched_appeal = appeal
-                                break
-                                
-                        if matched_appeal:
-                            mark_appeal_success(matched_appeal["id"])
-                            logger.info(f"MATCH SUCCESS! WhatsApp reply verified for {matched_appeal['phone_number']}")
-                            if notify_callback:
-                                notify_callback(matched_appeal)
+                        from core.database import mark_appeal_success_by_phone
+                        
+                        item = None
+                        if phone_matched:
+                            item = mark_appeal_success_by_phone(phone_matched)
+                            
+                        if item and notify_callback:
+                            try:
+                                notify_callback(item)
+                            except Exception as cb_err:
+                                logger.error(f"Error in IMAP notify_callback: {cb_err}")
                                 
         mail.logout()
     except Exception as e:
-        logger.error(f"IMAP Poll Error for {email_user}: {str(e)}")
+        logger.debug(f"IMAP poll error for {email_user}: {e}")
 
-async def start_imap_listener_loop(interval_seconds: int, notify_callback: Optional[Callable] = None):
-    logger.info(f"Starting Smart IMAP Listener Daemon (Interval: {interval_seconds}s, Zero-Traffic Idle Mode: Enabled)")
+async def start_imap_listener_loop(interval_seconds: int = 35, notify_callback: Optional[Callable] = None):
+    logger.info(f"Starting Smart IMAP Listener Daemon (Interval: {interval_seconds}s)")
     while True:
         try:
-            # Zero-Traffic Guard: If no appeals are PENDING, don't open IMAP connection (0 KB proxy quota used)
-            pending_appeals = get_pending_appeals()
-            if pending_appeals:
-                senders = get_active_senders()
+            senders = get_active_senders()
+            pending = get_pending_appeals()
+            
+            if senders and pending:
                 for sender in senders:
                     await asyncio.to_thread(poll_gmail_inbox, sender, notify_callback)
         except Exception as e:
-            logger.error(f"IMAP Loop Exception: {str(e)}")
+            logger.error(f"Error in IMAP listener main loop: {e}")
+            
         await asyncio.sleep(interval_seconds)

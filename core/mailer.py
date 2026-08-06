@@ -14,25 +14,28 @@ from config import TARGET_RECIPIENTS, APPS_SCRIPT_URL, OUTBOUND_PROXY
 
 logger = logging.getLogger(__name__)
 
-# Apply SOCKS5 proxy if OUTBOUND_PROXY is configured in .env
-if OUTBOUND_PROXY:
-    try:
-        import socks
-        p = urllib.parse.urlparse(OUTBOUND_PROXY)
-        proxy_type = socks.SOCKS5 if p.scheme.startswith("socks5") else socks.HTTP
-        socks.set_default_proxy(proxy_type, p.hostname, p.port, username=p.username, password=p.password)
-        socks.wrap_module(smtplib)
-        logger.info(f"OUTBOUND_PROXY configured for SMTP ({p.hostname}:{p.port})")
-    except Exception as e:
-        logger.warning(f"Failed to setup OUTBOUND_PROXY for SMTP: {e}")
-
-# Force IPv4 resolution for sockets if legacy SMTP is used
-_orig_getaddrinfo = socket.getaddrinfo
-
-def _force_ipv4_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
-    return _orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
-
-socket.getaddrinfo = _force_ipv4_getaddrinfo
+def create_socks5_smtp_connection(host: str = "smtp.gmail.com", port: int = 465, timeout: int = 15):
+    """
+    Creates isolated SOCKS5 SMTP_SSL connection without polluting global socket.socket.
+    """
+    if OUTBOUND_PROXY:
+        try:
+            import socks
+            p = urllib.parse.urlparse(OUTBOUND_PROXY)
+            proxy_type = socks.SOCKS5 if p.scheme.startswith("socks5") else socks.HTTP
+            
+            s = socks.socksocket()
+            s.set_proxy(proxy_type, p.hostname, p.port, username=p.username, password=p.password)
+            s.settimeout(timeout)
+            s.connect((host, port))
+            
+            server = smtplib.SMTP_SSL(host, port, timeout=timeout)
+            server.sock = s
+            return server
+        except Exception as e:
+            logger.warning(f"SOCKS5 Proxy SMTP connection failed: {e}. Falling back to direct socket.")
+            
+    return smtplib.SMTP_SSL(host, port, timeout=timeout)
 
 def sanitize_apps_script_url(url: str) -> str:
     url = url.strip()
@@ -90,7 +93,6 @@ def send_via_apps_script(sender_email: str, sender_password: str, sender_name: s
         return False, f"Apps Script HTTP Network Error: {str(e)}"
 
 def send_appeal_email(phone_data: Dict[str, Any], email_payload: Dict[str, str]) -> Tuple[bool, str, Dict[str, Any]]:
-    # Late import to prevent circular dependency
     from core.database import get_next_sender, add_appeal
     
     sender = get_next_sender()
@@ -101,13 +103,12 @@ def send_appeal_email(phone_data: Dict[str, Any], email_payload: Dict[str, str])
     sender_password = sender["password"]
     sender_name = email_payload["sender_name"]
     
-    # Generate unique Message-ID
     domain = sender_email.split("@")[-1] if "@" in sender_email else "gmail.com"
     message_id = f"<{uuid.uuid4().hex}.wa_appeal.{phone_data['formatted'].replace('+', '')}@{domain}>"
     
     errors = []
 
-    # --- STRATEGY 1: Direct SMTP SSL Port 465 FIRST (Fastest for Termux & Proxy environments) ---
+    # --- STRATEGY 1: SMTP SSL Port 465 via SOCKS5 Proxy ---
     msg = MIMEMultipart()
     msg["From"] = f"{sender_name} <{sender_email}>"
     msg["To"] = ", ".join(TARGET_RECIPIENTS)
@@ -118,7 +119,7 @@ def send_appeal_email(phone_data: Dict[str, Any], email_payload: Dict[str, str])
     msg.attach(MIMEText(email_payload["body"], "plain", "utf-8"))
     
     try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15) as server:
+        with create_socks5_smtp_connection("smtp.gmail.com", 465, timeout=15) as server:
             server.login(sender_email, sender_password)
             server.sendmail(sender_email, TARGET_RECIPIENTS, msg.as_string())
             
@@ -163,14 +164,12 @@ def send_appeal_email(phone_data: Dict[str, Any], email_payload: Dict[str, str])
                 "recipients": TARGET_RECIPIENTS
             }
         else:
-            errors.append(f"HTTP Relay Error: {msg_http}")
-            
-    # --- STRATEGY 3: Direct SMTP Port 587 STARTTLS (Fallback) ---
+            errors.append(f"HTTP Relay error: {msg_http}")
+
+    # --- STRATEGY 3: SMTP TLS Port 587 Fallback ---
     try:
-        with smtplib.SMTP("smtp.gmail.com", 587, timeout=12) as server:
-            server.ehlo()
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=15) as server:
             server.starttls()
-            server.ehlo()
             server.login(sender_email, sender_password)
             server.sendmail(sender_email, TARGET_RECIPIENTS, msg.as_string())
             
@@ -183,7 +182,7 @@ def send_appeal_email(phone_data: Dict[str, Any], email_payload: Dict[str, str])
             subject=email_payload["subject"],
             body=email_payload["body"]
         )
-        return True, "Email sent successfully to 3 WhatsApp Support targets (Port 587).", {
+        return True, "Email sent successfully to 3 WhatsApp Support targets (Port 587 TLS).", {
             "appeal_id": appeal_id,
             "sender_email": sender_email,
             "message_id": message_id,
@@ -192,4 +191,5 @@ def send_appeal_email(phone_data: Dict[str, Any], email_payload: Dict[str, str])
     except Exception as e:
         errors.append(f"Port 587 error: {str(e)}")
 
-    return False, f"Send Error: { ' | '.join(errors) }", {}
+    all_errors = " | ".join(errors)
+    return False, f"All dispatch methods failed: {all_errors}", {}
