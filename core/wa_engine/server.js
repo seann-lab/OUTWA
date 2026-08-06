@@ -40,14 +40,6 @@ const withTimeout = (promise, ms = 800, fallback = undefined) => {
 };
 
 const getWaWebVersion = async () => {
-  try {
-    const res = await fetch('https://web.whatsapp.com/check-update?version=1&platform=web');
-    const json = await res.json();
-    if (json && json.currentVersion) {
-      const v = json.currentVersion.split('.').map(Number);
-      if (v.length === 3) return { version: v };
-    }
-  } catch (e) {}
   return await fetchLatestBaileysVersion().catch(() => ({ version: [2, 3000, 1043857760] }));
 };
 
@@ -144,8 +136,12 @@ async function initWASocket() {
 // Generate pairing code cleanly on a single fresh socket using Browsers.ubuntu('Chrome')
 async function generatePairingCode(rawPhone) {
   if (sock) {
-    try { sock.end(undefined); } catch (e) {}
+    try {
+      sock.end(undefined);
+      if (sock.ws) sock.ws.close();
+    } catch (e) {}
     sock = null;
+    await delay(500);
   }
 
   // Clear any old/poisoned session folder before requesting a new pairing code
@@ -182,50 +178,48 @@ async function generatePairingCode(rawPhone) {
       reject(new Error('Timed out waiting for pairing code (25s)'));
     }, 25000);
 
-    sock.ev.process(async (events) => {
-      if (events['creds.update']) {
-        try {
-          if (!fs.existsSync(SESSION_DIR)) fs.mkdirSync(SESSION_DIR, { recursive: true });
-          await saveCreds();
-        } catch (e) {}
+    sock.ev.on('creds.update', async () => {
+      try {
+        if (!fs.existsSync(SESSION_DIR)) fs.mkdirSync(SESSION_DIR, { recursive: true });
+        await saveCreds();
+      } catch (e) {}
+    });
+
+    sock.ev.on('connection.update', async (update) => {
+      const { connection, qr, lastDisconnect } = update;
+
+      if (connection === 'connecting') {
+        connectionStatus = 'CONNECTING';
       }
 
-      if (events['connection.update']) {
-        const { connection, qr, lastDisconnect } = events['connection.update'];
+      if (connection === 'open') {
+        connectionStatus = 'CONNECTED';
+        console.log(`[WA-ENGINE] Connected as: ${sock.user?.id || 'Unknown'}`);
+      }
 
-        if (connection === 'connecting') {
-          connectionStatus = 'CONNECTING';
+      if (qr && !requested) {
+        requested = true;
+        try {
+          console.log(`[WA-ENGINE] Handshake ready (QR received), requesting pairing code for ${rawPhone}...`);
+          const code = await sock.requestPairingCode(rawPhone);
+          clearTimeout(timer);
+          resolve({ registered: false, code });
+        } catch (err) {
+          clearTimeout(timer);
+          reject(err);
         }
+      }
 
-        if (connection === 'open') {
-          connectionStatus = 'CONNECTED';
-          console.log(`[WA-ENGINE] Connected as: ${sock.user?.id || 'Unknown'}`);
-        }
+      if (connection === 'close') {
+        connectionStatus = 'DISCONNECTED';
+        const statusCode = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.statusCode;
+        console.log(`[WA-ENGINE] Pairing socket closed (Status Code: ${statusCode})`);
 
-        if (qr && !requested) {
-          requested = true;
-          try {
-            console.log(`[WA-ENGINE] Handshake ready (QR received), requesting pairing code for ${rawPhone}...`);
-            const code = await sock.requestPairingCode(rawPhone);
-            clearTimeout(timer);
-            resolve({ registered: false, code });
-          } catch (err) {
-            clearTimeout(timer);
-            reject(err);
-          }
-        }
-
-        if (connection === 'close') {
-          connectionStatus = 'DISCONNECTED';
-          const statusCode = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.statusCode;
-          console.log(`[WA-ENGINE] Pairing socket closed (Status Code: ${statusCode})`);
-
-          if (statusCode === 515 || statusCode === DisconnectReason.restartRequired) {
-            console.log('[WA-ENGINE] Post-pairing restart (Status 515) received, reconnecting to finalize login...');
-            setTimeout(() => {
-              initWASocket().catch(err => console.error('[WA-ENGINE] Post-515 reconnect failed:', err));
-            }, 1500);
-          }
+        if (statusCode === 515 || statusCode === DisconnectReason.restartRequired) {
+          console.log('[WA-ENGINE] Post-pairing restart (Status 515) received, reconnecting to finalize login...');
+          setTimeout(() => {
+            initWASocket().catch(err => console.error('[WA-ENGINE] Post-515 reconnect failed:', err));
+          }, 1500);
         }
       }
     });
