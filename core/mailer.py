@@ -1,5 +1,6 @@
 import smtplib
 import socket
+import ssl
 import uuid
 import time
 import json
@@ -14,9 +15,24 @@ from config import TARGET_RECIPIENTS, APPS_SCRIPT_URL, OUTBOUND_PROXY
 
 logger = logging.getLogger(__name__)
 
-def create_socks5_smtp_connection(host: str = "smtp.gmail.com", port: int = 465, timeout: int = 15):
+class SOCKS5SMTP(smtplib.SMTP):
     """
-    Creates isolated SOCKS5 SMTP_SSL connection without polluting global socket.socket.
+    Custom SMTP client that initializes from an already established SOCKS5+SSL socket.
+    """
+    def __init__(self, sock):
+        self.sock = sock
+        self.file = None
+        self.helo_resp = None
+        self.ehlo_resp = None
+        self.does_esmtp = 0
+        self.default_port = 465
+        (code, msg) = self.getreply()
+        if code != 220:
+            raise smtplib.SMTPConnectError(code, msg)
+
+def create_socks5_smtp_server(host: str = "smtp.gmail.com", port: int = 465, timeout: int = 15):
+    """
+    Creates isolated SOCKS5 SMTP_SSL connection for Gmail.
     """
     if OUTBOUND_PROXY:
         try:
@@ -29,9 +45,10 @@ def create_socks5_smtp_connection(host: str = "smtp.gmail.com", port: int = 465,
             s.settimeout(timeout)
             s.connect((host, port))
             
-            server = smtplib.SMTP_SSL(host, port, timeout=timeout)
-            server.sock = s
-            return server
+            context = ssl.create_default_context()
+            ssl_s = context.wrap_socket(s, server_hostname=host)
+            
+            return SOCKS5SMTP(ssl_s)
         except Exception as e:
             logger.warning(f"SOCKS5 Proxy SMTP connection failed: {e}. Falling back to direct socket.")
             
@@ -108,7 +125,7 @@ def send_appeal_email(phone_data: Dict[str, Any], email_payload: Dict[str, str])
     
     errors = []
 
-    # --- STRATEGY 1: SMTP SSL Port 465 via SOCKS5 Proxy ---
+    # --- STRATEGY 1: SMTP SSL Port 465 via Isolated SOCKS5 Socket ---
     msg = MIMEMultipart()
     msg["From"] = f"{sender_name} <{sender_email}>"
     msg["To"] = ", ".join(TARGET_RECIPIENTS)
@@ -119,9 +136,10 @@ def send_appeal_email(phone_data: Dict[str, Any], email_payload: Dict[str, str])
     msg.attach(MIMEText(email_payload["body"], "plain", "utf-8"))
     
     try:
-        with create_socks5_smtp_connection("smtp.gmail.com", 465, timeout=15) as server:
-            server.login(sender_email, sender_password)
-            server.sendmail(sender_email, TARGET_RECIPIENTS, msg.as_string())
+        server = create_socks5_smtp_server("smtp.gmail.com", 465, timeout=15)
+        server.login(sender_email, sender_password)
+        server.sendmail(sender_email, TARGET_RECIPIENTS, msg.as_string())
+        server.quit()
             
         appeal_id = add_appeal(
             phone_number=phone_data["formatted"],

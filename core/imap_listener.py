@@ -1,6 +1,7 @@
 import imaplib
 import email
 import re
+import ssl
 import urllib.parse
 import asyncio
 import logging
@@ -19,28 +20,28 @@ PATTERNS = [
     r"collect information that’s necessary to understand and resolve your issue"
 ]
 
-def create_socks5_imap_connection(host: str = "imap.gmail.com", port: int = 993, timeout: int = 15):
+class SOCKS5IMAP4_SSL(imaplib.IMAP4_SSL):
     """
-    Creates isolated SOCKS5 IMAP4_SSL connection without polluting global socket.socket.
+    Isolated SOCKS5 IMAP4_SSL client for Gmail IMAP over SOCKS5 proxy.
     """
-    if OUTBOUND_PROXY:
-        try:
-            import socks
-            p = urllib.parse.urlparse(OUTBOUND_PROXY)
-            proxy_type = socks.SOCKS5 if p.scheme.startswith("socks5") else socks.HTTP
-            
-            s = socks.socksocket()
-            s.set_proxy(proxy_type, p.hostname, p.port, username=p.username, password=p.password)
-            s.settimeout(timeout)
-            s.connect((host, port))
-            
-            mail = imaplib.IMAP4_SSL(host, port, timeout=timeout)
-            mail.sock = s
-            return mail
-        except Exception as e:
-            logger.warning(f"SOCKS5 Proxy IMAP connection failed: {e}. Falling back to direct socket.")
-            
-    return imaplib.IMAP4_SSL(host, port, timeout=timeout)
+    def _create_socket(self, timeout=15):
+        if OUTBOUND_PROXY:
+            try:
+                import socks
+                p = urllib.parse.urlparse(OUTBOUND_PROXY)
+                proxy_type = socks.SOCKS5 if p.scheme.startswith("socks5") else socks.HTTP
+                
+                s = socks.socksocket()
+                s.set_proxy(proxy_type, p.hostname, p.port, username=p.username, password=p.password)
+                s.settimeout(timeout if timeout is not None else self.timeout)
+                s.connect((self.host, self.port))
+                
+                context = ssl.create_default_context()
+                return context.wrap_socket(s, server_hostname=self.host)
+            except Exception as e:
+                logger.warning(f"SOCKS5 Proxy IMAP connection failed: {e}. Falling back to direct socket.")
+                
+        return super()._create_socket(timeout)
 
 def check_body_patterns(body_text: str) -> bool:
     for pat in PATTERNS:
@@ -60,7 +61,7 @@ def poll_gmail_inbox(sender: Dict[str, str], notify_callback: Optional[Callable]
     email_pass = sender["password"]
     
     try:
-        mail = create_socks5_imap_connection("imap.gmail.com", 993, timeout=15)
+        mail = SOCKS5IMAP4_SSL("imap.gmail.com", 993, timeout=15)
         mail.login(email_user, email_pass)
         mail.select("inbox")
         
