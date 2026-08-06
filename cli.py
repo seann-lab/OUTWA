@@ -413,7 +413,7 @@ def run_profiler_suite():
         task = progress.add_task(f"[cyan]Scanning {len(numbers)} nomor...", total=len(numbers))
 
         while not progress.finished:
-            time.sleep(1)
+            time.sleep(0.5)
             job_data = get_wa_scan_job_status(job_id)
             if not job_data:
                 continue
