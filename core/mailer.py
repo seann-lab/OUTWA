@@ -15,44 +15,28 @@ from config import TARGET_RECIPIENTS, APPS_SCRIPT_URL, OUTBOUND_PROXY
 
 logger = logging.getLogger(__name__)
 
-class SOCKS5SMTP(smtplib.SMTP):
+class SOCKS5SMTP_SSL(smtplib.SMTP_SSL):
     """
-    Custom SMTP client that initializes from an already established SOCKS5+SSL socket.
+    Subclass of smtplib.SMTP_SSL that negotiates connection via SOCKS5 proxy
+    before performing TLS handshake, preserving all standard smtplib attributes (like local_hostname).
     """
-    def __init__(self, sock):
-        self.sock = sock
-        self.file = None
-        self.helo_resp = None
-        self.ehlo_resp = None
-        self.does_esmtp = 0
-        self.default_port = 465
-        (code, msg) = self.getreply()
-        if code != 220:
-            raise smtplib.SMTPConnectError(code, msg)
-
-def create_socks5_smtp_server(host: str = "smtp.gmail.com", port: int = 465, timeout: int = 15):
-    """
-    Creates isolated SOCKS5 SMTP_SSL connection for Gmail.
-    """
-    if OUTBOUND_PROXY:
-        try:
-            import socks
-            p = urllib.parse.urlparse(OUTBOUND_PROXY)
-            proxy_type = socks.SOCKS5 if p.scheme.startswith("socks5") else socks.HTTP
-            
-            s = socks.socksocket()
-            s.set_proxy(proxy_type, p.hostname, p.port, username=p.username, password=p.password)
-            s.settimeout(timeout)
-            s.connect((host, port))
-            
-            context = ssl.create_default_context()
-            ssl_s = context.wrap_socket(s, server_hostname=host)
-            
-            return SOCKS5SMTP(ssl_s)
-        except Exception as e:
-            logger.warning(f"SOCKS5 Proxy SMTP connection failed: {e}. Falling back to direct socket.")
-            
-    return smtplib.SMTP_SSL(host, port, timeout=timeout)
+    def _get_socket(self, host, port, timeout):
+        if OUTBOUND_PROXY:
+            try:
+                import socks
+                p = urllib.parse.urlparse(OUTBOUND_PROXY)
+                proxy_type = socks.SOCKS5 if p.scheme.startswith("socks5") else socks.HTTP
+                
+                s = socks.socksocket()
+                s.set_proxy(proxy_type, p.hostname, p.port, username=p.username, password=p.password)
+                s.settimeout(timeout if timeout is not None else self.timeout)
+                s.connect((host, port))
+                
+                return self.context.wrap_socket(s, server_hostname=self._host)
+            except Exception as e:
+                logger.warning(f"SOCKS5 Proxy socket creation failed: {e}. Falling back to standard socket.")
+                
+        return super()._get_socket(host, port, timeout)
 
 def sanitize_apps_script_url(url: str) -> str:
     url = url.strip()
@@ -125,7 +109,7 @@ def send_appeal_email(phone_data: Dict[str, Any], email_payload: Dict[str, str])
     
     errors = []
 
-    # --- STRATEGY 1: SMTP SSL Port 465 via Isolated SOCKS5 Socket ---
+    # --- STRATEGY 1: SMTP SSL Port 465 via SOCKS5SMTP_SSL ---
     msg = MIMEMultipart()
     msg["From"] = f"{sender_name} <{sender_email}>"
     msg["To"] = ", ".join(TARGET_RECIPIENTS)
@@ -136,10 +120,9 @@ def send_appeal_email(phone_data: Dict[str, Any], email_payload: Dict[str, str])
     msg.attach(MIMEText(email_payload["body"], "plain", "utf-8"))
     
     try:
-        server = create_socks5_smtp_server("smtp.gmail.com", 465, timeout=15)
-        server.login(sender_email, sender_password)
-        server.sendmail(sender_email, TARGET_RECIPIENTS, msg.as_string())
-        server.quit()
+        with SOCKS5SMTP_SSL("smtp.gmail.com", 465, timeout=15) as server:
+            server.login(sender_email, sender_password)
+            server.sendmail(sender_email, TARGET_RECIPIENTS, msg.as_string())
             
         appeal_id = add_appeal(
             phone_number=phone_data["formatted"],
