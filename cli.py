@@ -106,16 +106,12 @@ def ensure_wa_engine_running():
     except Exception:
         pass
 
-    engine_dir = Path("/data/data/com.termux/files/home/storage/shared/opencode-projects/Appeal bot/core/wa_engine")
-    if not engine_dir.exists():
-        engine_dir = Path(__file__).resolve().parent / "core" / "wa_engine"
-        
+    engine_dir = Path(__file__).resolve().parent / "core" / "wa_engine"
     node_bin = shutil.which("node") or "/data/data/com.termux/files/usr/bin/node"
     
     if (engine_dir / "server.js").exists():
         try:
             env = os.environ.copy()
-            # Clean proxy vars for node
             env.pop('HTTP_PROXY', None)
             env.pop('HTTPS_PROXY', None)
             env.pop('ALL_PROXY', None)
@@ -130,7 +126,7 @@ def ensure_wa_engine_running():
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
-            for _ in range(15):
+            for _ in range(20):
                 time.sleep(0.5)
                 try:
                     r = requests.get("http://127.0.0.1:12711/health", timeout=1)
