@@ -30,9 +30,9 @@ let saveCredsFunc = null;
 let connectionStatus = 'DISCONNECTED';
 const jobs = new Map();
 
-const delay = (baseMs, jitterMs = 500) => new Promise(r => setTimeout(r, baseMs + Math.random() * jitterMs));
+const delay = (baseMs, jitterMs = 300) => new Promise(r => setTimeout(r, baseMs + Math.random() * jitterMs));
 
-const withTimeout = (promise, ms = 1500, fallback = undefined) => {
+const withTimeout = (promise, ms = 800, fallback = undefined) => {
   return Promise.race([
     promise,
     new Promise(resolve => setTimeout(() => resolve(fallback), ms))
@@ -141,14 +141,13 @@ async function initWASocket() {
   return sock;
 }
 
-// Generate pairing code cleanly matching tested Baileys pattern
+// Generate pairing code cleanly on a single fresh socket using Browsers.macOS('Chrome')
 async function generatePairingCode(rawPhone) {
   if (sock) {
     try { sock.end(undefined); } catch (e) {}
     sock = null;
   }
 
-  // Clear any old/poisoned session folder before requesting a new pairing code
   try {
     fs.rmSync(SESSION_DIR, { recursive: true, force: true });
     fs.mkdirSync(SESSION_DIR, { recursive: true });
@@ -158,7 +157,7 @@ async function generatePairingCode(rawPhone) {
   authState = state;
 
   const logger = pino({ level: 'silent' });
-  const { version } = await fetchLatestBaileysVersion().catch(() => ({ version: [2, 3000, 1043857760] }));
+  const { version } = await getWaWebVersion();
 
   sock = makeWASocket({
     version,
@@ -232,14 +231,14 @@ async function generatePairingCode(rawPhone) {
   });
 }
 
-// Raw w:biz IQ Query for Meta Verified (Vermet) & Business Profile
+// Fast Business Profile Fetcher with 800ms cap
 async function getBusinessProfileRaw(jid) {
   const normalizedJid = jidNormalizedUser(jid);
   let profile = null;
   let verified = null;
 
   try {
-    profile = await withTimeout(sock.getBusinessProfile(normalizedJid), 1200, undefined);
+    profile = await withTimeout(sock.getBusinessProfile(normalizedJid), 800, undefined);
   } catch (e) {}
 
   if (profile) {
@@ -248,7 +247,7 @@ async function getBusinessProfileRaw(jid) {
         tag: 'iq',
         attrs: { to: 's.whatsapp.net', xmlns: 'w:biz', type: 'get' },
         content: [{ tag: 'business_profile', attrs: { v: '244' }, content: [{ tag: 'profile', attrs: { jid: normalizedJid } }] }]
-      }), 1200, undefined);
+      }), 800, undefined);
 
       if (results) {
         const bizProfileNode = getBinaryNodeChild(results, 'business_profile');
@@ -278,7 +277,7 @@ async function getBusinessProfileRaw(jid) {
   return { profile, verified };
 }
 
-// Catalog & Commercial Offer Inspector
+// Catalog Inspector (800ms cap)
 async function checkCommercialOffers(jid) {
   const normalizedJid = jidNormalizedUser(jid);
   let hasCatalog = false;
@@ -286,7 +285,7 @@ async function checkCommercialOffers(jid) {
   let sampleProducts = [];
 
   try {
-    const catalog = await withTimeout(sock.getCatalog({ jid: normalizedJid, limit: 10 }), 1200, undefined);
+    const catalog = await withTimeout(sock.getCatalog({ jid: normalizedJid, limit: 10 }), 800, undefined);
     if (catalog && catalog.products && catalog.products.length > 0) {
       hasCatalog = true;
       productsCount = catalog.products.length;
@@ -301,7 +300,82 @@ async function checkCommercialOffers(jid) {
   return { hasCatalog, productsCount, sampleProducts };
 }
 
-// Turbo High-Speed Batch Scan Runner
+// Single Active WA Worker Process (Ultra-Fast Concurrent Worker)
+async function processActiveNumberWorker(targetJid, rawNum) {
+  try {
+    const [statusResResult, bizResResult] = await Promise.allSettled([
+      withTimeout(sock.fetchStatus(targetJid), 800, undefined),
+      getBusinessProfileRaw(targetJid)
+    ]);
+
+    const statusRes = statusResResult.status === 'fulfilled' ? statusResResult.value : undefined;
+    const bizRes = bizResResult.status === 'fulfilled' ? bizResResult.value : { profile: null, verified: null };
+
+    let bioText = statusRes?.status || '';
+    const profile = bizRes?.profile || null;
+    const verified = bizRes?.verified || null;
+    
+    let accountType = 'Personal';
+    let isVermet = false;
+    let verifiedLevel = verified?.verifiedLevel || 'none';
+    let verifiedName = verified?.verifiedName || '';
+
+    if (profile) {
+      accountType = 'Business';
+    }
+    if (verifiedLevel === 'blue' || verifiedLevel === 'green' || verifiedName) {
+      isVermet = true;
+      if (accountType === 'Personal') accountType = 'Verified Enterprise';
+    }
+
+    let hasOffers = false;
+    let category = profile?.category || '';
+    let description = profile?.description || '';
+
+    if (profile) {
+      const offersInfo = await checkCommercialOffers(targetJid);
+      if (offersInfo.hasCatalog || offersInfo.productsCount > 0) {
+        hasOffers = true;
+      }
+    }
+
+    const offerKeywords = ['promo', 'diskon', 'order', 'jasa', 'jual', 'ready', 'price', 'harga', 'wa.me', 'http'];
+    const combinedText = `${bioText} ${description}`.toLowerCase();
+    if (offerKeywords.some(kw => combinedText.includes(kw))) {
+      hasOffers = true;
+    }
+
+    return {
+      phone: rawNum,
+      jid: targetJid,
+      exists: true,
+      accountType,
+      isVermet,
+      verifiedLevel,
+      verifiedName,
+      hasOffers,
+      category,
+      description,
+      bio: bioText
+    };
+  } catch (err) {
+    return {
+      phone: rawNum,
+      jid: targetJid,
+      exists: true,
+      accountType: 'Personal',
+      isVermet: false,
+      verifiedLevel: 'none',
+      verifiedName: '',
+      hasOffers: false,
+      category: '',
+      description: '',
+      bio: ''
+    };
+  }
+}
+
+// True Chunk-Parallel Ultra-Fast Batch Scan Runner
 async function runBatchScan(jobId, numbers) {
   const job = jobs.get(jobId);
   if (!job) return;
@@ -328,6 +402,9 @@ async function runBatchScan(jobId, numbers) {
         });
       }
 
+      // Collect all tasks for the chunk and run them concurrently in PARALLEL
+      const activeWorkerPromises = [];
+
       for (let j = 0; j < chunkJids.length; j++) {
         if (job.status === 'CANCELLED') break;
 
@@ -350,80 +427,31 @@ async function runBatchScan(jobId, numbers) {
             description: '',
             bio: ''
           });
-          continue;
+        } else {
+          activeWorkerPromises.push(processActiveNumberWorker(targetJid, rawNum));
         }
-
-        // Parallel fetch status & profile for active WhatsApp accounts with 1.2s strict cap
-        const [statusResResult, bizResResult] = await Promise.allSettled([
-          withTimeout(sock.fetchStatus(targetJid), 1200, undefined),
-          getBusinessProfileRaw(targetJid)
-        ]);
-
-        const statusRes = statusResResult.status === 'fulfilled' ? statusResResult.value : undefined;
-        const bizRes = bizResResult.status === 'fulfilled' ? bizResResult.value : { profile: null, verified: null };
-
-        let bioText = statusRes?.status || '';
-        const profile = bizRes?.profile || null;
-        const verified = bizRes?.verified || null;
-        
-        let accountType = 'Personal';
-        let isVermet = false;
-        let verifiedLevel = verified?.verifiedLevel || 'none';
-        let verifiedName = verified?.verifiedName || '';
-
-        if (profile) {
-          accountType = 'Business';
-        }
-        if (verifiedLevel === 'blue' || verifiedLevel === 'green' || verifiedName) {
-          isVermet = true;
-          if (accountType === 'Personal') accountType = 'Verified Enterprise';
-        }
-
-        let hasOffers = false;
-        let category = profile?.category || '';
-        let description = profile?.description || '';
-
-        // Only query catalog if account is verified Business
-        if (profile) {
-          const offersInfo = await checkCommercialOffers(targetJid);
-          if (offersInfo.hasCatalog || offersInfo.productsCount > 0) {
-            hasOffers = true;
-          }
-        }
-
-        const offerKeywords = ['promo', 'diskon', 'order', 'jasa', 'jual', 'ready', 'price', 'harga', 'wa.me', 'http'];
-        const combinedText = `${bioText} ${description}`.toLowerCase();
-        if (offerKeywords.some(kw => combinedText.includes(kw))) {
-          hasOffers = true;
-        }
-
-        job.done++;
-        job.results.push({
-          phone: rawNum,
-          jid: targetJid,
-          exists: true,
-          accountType,
-          isVermet,
-          verifiedLevel,
-          verifiedName,
-          hasOffers,
-          category,
-          description,
-          bio: bioText
-        });
-
-        await delay(150, 150);
       }
+
+      // Execute all active WA profiles in the chunk PARALLEL SIMULTANEOUSLY!
+      if (activeWorkerPromises.length > 0) {
+        const workerResults = await Promise.all(activeWorkerPromises);
+        for (const res of workerResults) {
+          job.done++;
+          job.results.push(res);
+        }
+      }
+
+      await delay(100, 100);
     } catch (err) {
       console.error(`[WA-ENGINE] Batch error at index ${i}:`, err.message);
-      await delay(2000);
+      await delay(1000);
     }
 
     if ((i + CHUNK_SIZE) % REST_EVERY === 0 && i > 0) {
       console.log(`[WA-ENGINE] Circuit breaker rest window (${REST_MS / 1000}s) active...`);
       await delay(REST_MS, 3000);
     } else {
-      await delay(500, 500);
+      await delay(300, 300);
     }
   }
 
