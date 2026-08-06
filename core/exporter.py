@@ -44,11 +44,8 @@ def generate_wa_profiler_csv(results: List[Dict[str, Any]], output_dir: Path, in
         phone = item.get("phone", "")
         status_wa = "TERDAFTAR (VALID)" if exists else "TIDAK TERDAFTAR"
         
-        country = item.get("country", "")
-        if not country and phone.startswith("+62"):
-            country = "Indonesia"
-            
         carrier_meta = resolve_carrier_and_asn(phone)
+        country = item.get("country", "") or carrier_meta.get("country_name", "International")
         carrier_asn_str = carrier_meta["display"]
         flameproxies_usn = build_flameproxies_usn(phone)
             
